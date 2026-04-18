@@ -976,9 +976,9 @@ class _LiveDotState extends State<_LiveDot> with SingleTickerProviderStateMixin 
   @override
   Widget build(BuildContext context) => FadeTransition(
     opacity: _ctrl,
-    child: Row(mainAxisSize: MainAxisSize.min, children: const [
+    child: Row(mainAxisSize: MainAxisSize.min, children: [
       Icon(Icons.circle, size: 8, color: Palette.success),
-      SizedBox(width: 4),
+      const SizedBox(width: 4),
       Text('LIVE', style: TextStyle(fontSize: 9, color: Palette.success, fontWeight: FontWeight.w700)),
     ]),
   );
@@ -1647,7 +1647,7 @@ class _DevicePickerSheetState extends State<DevicePickerSheet> {
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 12, 12, 8),
           child: Row(children: [
-            const Expanded(child: Text('SELECT DEVICE',
+            Expanded(child: Text('SELECT DEVICE',
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900, letterSpacing: 1.5, color: Palette.accent))),
             IconButton(
               icon: Icon(_scanning ? Icons.stop_circle_outlined : Icons.refresh, color: Palette.accent),
