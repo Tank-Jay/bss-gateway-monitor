@@ -1,0 +1,77 @@
+name: Build BSS Mobile App APK
+
+on:
+  # Trigger on push to main branch
+  push:
+    branches: [main, master]
+    paths:
+      - 'mobile_app/**'
+      - '.github/workflows/build-apk.yml'
+
+  # Allow manual trigger from GitHub UI (Actions tab → Run workflow)
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Flutter doctor
+        working-directory: ./mobile_app
+        run: flutter doctor -v
+
+      - name: Generate Android scaffolding
+        working-directory: ./mobile_app
+        # flutter create fills in android/, ios/, gradle files, MainActivity etc.
+        # without overwriting pubspec.yaml, lib/, or our customized AndroidManifest.xml
+        run: |
+          flutter create \
+            --project-name bss_gateway_monitor \
+            --org com.bss.monitor \
+            --platforms android \
+            .
+
+      - name: Install dependencies
+        working-directory: ./mobile_app
+        run: flutter pub get
+
+      - name: Build release APK
+        working-directory: ./mobile_app
+        run: flutter build apk --release
+
+      - name: Rename APK with build info
+        working-directory: ./mobile_app
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-release.apk \
+             dist/bss-gateway-monitor-${{ github.run_number }}.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bss-gateway-monitor-apk
+          path: mobile_app/dist/*.apk
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          echo "## APK Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Download:** Go to this run's **Artifacts** section at the bottom of the page." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**File:** \`bss-gateway-monitor-${{ github.run_number }}.apk\`" >> $GITHUB_STEP_SUMMARY
