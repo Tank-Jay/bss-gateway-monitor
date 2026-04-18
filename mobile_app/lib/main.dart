@@ -264,43 +264,73 @@ class BleService extends ChangeNotifier {
 
   Future<void> scanAndConnect() async {
     _setState(ConnectionState.scanning);
-    log(LogType.info, 'Scanning for BSSX_ devices...');
+    log(LogType.info, 'Checking permissions...');
 
     try {
       if (!await requestPermissions()) {
-        log(LogType.err, 'Bluetooth permissions denied');
+        log(LogType.err, 'Bluetooth permissions denied — grant in Settings');
         _setState(ConnectionState.disconnected);
         return;
       }
 
-      // Start scan
-      await FlutterBluePlus.startScan(
-        timeout: const Duration(seconds: 8),
-        withKeywords: ['BSSX_', 'BSS_'],
-      );
+      // Make sure Bluetooth is on
+      if (await FlutterBluePlus.isSupported == false) {
+        log(LogType.err, 'Bluetooth not supported on this device');
+        _setState(ConnectionState.disconnected);
+        return;
+      }
+
+      final btState = await FlutterBluePlus.adapterState.first;
+      if (btState != BluetoothAdapterState.on) {
+        log(LogType.err, 'Bluetooth is OFF — turn it on in system settings');
+        _setState(ConnectionState.disconnected);
+        return;
+      }
+
+      log(LogType.info, 'Scanning (no filter, looking for BSS_/BSSX_)...');
+
+      // Scan with NO filter — we match manually. withKeywords is too strict
+      // because many BLE devices put their name in the scan response, not
+      // the advertisement packet.
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
 
       BluetoothDevice? found;
+      final seenNames = <String>{};
+
       final sub = FlutterBluePlus.scanResults.listen((results) {
         for (final r in results) {
-          final name = r.device.platformName;
+          // Check both platformName AND advertisement advName (scan response)
+          final nameA = r.device.platformName;
+          final nameB = r.advertisementData.advName;
+          final name = nameA.isNotEmpty ? nameA : nameB;
+
+          if (name.isNotEmpty && !seenNames.contains(name)) {
+            seenNames.add(name);
+            log(LogType.info, 'Seen: "$name" rssi=${r.rssi}');
+          }
+
           if (name.startsWith('BSSX_') || name.startsWith('BSS_')) {
-            found = r.device;
+            found ??= r.device;
           }
         }
       });
 
-      await Future.delayed(const Duration(seconds: 8));
+      // Wait for scan to complete or device found
+      for (int i = 0; i < 20 && found == null; i++) {
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
       await FlutterBluePlus.stopScan();
       await sub.cancel();
 
       if (found == null) {
-        log(LogType.err, 'No BSS device found');
+        log(LogType.err, 'No BSS device found in ${seenNames.length} devices seen');
+        log(LogType.err, 'Verify ESP32 is powered and advertising (check nRF Connect)');
         _setState(ConnectionState.disconnected);
         return;
       }
 
       device = found;
-      deviceName = found!.platformName;
+      deviceName = found!.platformName.isNotEmpty ? found!.platformName : 'BSS Device';
       log(LogType.info, 'Found: $deviceName');
 
       _setState(ConnectionState.connecting);
