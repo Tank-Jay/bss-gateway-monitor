@@ -11,6 +11,9 @@ on:
   # Allow manual trigger from GitHub UI (Actions tab → Run workflow)
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
@@ -68,10 +71,34 @@ jobs:
           path: mobile_app/dist/*.apk
           retention-days: 30
 
+      - name: Read app version from pubspec
+        id: pubspec
+        working-directory: ./mobile_app
+        run: |
+          VER=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
+          echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "tag=v${VER}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pubspec.outputs.tag }}-build${{ github.run_number }}
+          name: BSS Gateway Monitor ${{ steps.pubspec.outputs.tag }} (build ${{ github.run_number }})
+          body: |
+            Automated build from commit ${{ github.sha }}.
+
+            **Install:** download the APK below, then open it on Android to install.
+          files: mobile_app/dist/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Summary
         run: |
           echo "## APK Build Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Download:** Go to this run's **Artifacts** section at the bottom of the page." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.pubspec.outputs.tag }} (build ${{ github.run_number }})" >> $GITHUB_STEP_SUMMARY
+          echo "**Download:** see the Releases page or this run's Artifacts section." >> $GITHUB_STEP_SUMMARY
           echo "**File:** \`bss-gateway-monitor-${{ github.run_number }}.apk\`" >> $GITHUB_STEP_SUMMARY

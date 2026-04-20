@@ -8,6 +8,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
+import 'package:url_launcher/url_launcher.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 // ══════════════════════════════════════════════════════════════
 //  BLE UUIDs — must match BLE_handler.h
@@ -129,6 +132,7 @@ Future<void> toggleTheme(ThemeMode mode) async {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await loadSavedTheme();
+  await UpdateChecker.init();
   runApp(const BssApp());
 }
 
@@ -345,6 +349,69 @@ class _LoginScreenState extends State<LoginScreen> {
       ),
       onSubmitted: (_) => _doLogin(),
     );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Update Checker — GitHub Releases
+// ══════════════════════════════════════════════════════════════
+class UpdateInfo {
+  final String latestVersion;
+  final String apkUrl;
+  final String releaseNotes;
+  final String releasePageUrl;
+  UpdateInfo({required this.latestVersion, required this.apkUrl, required this.releaseNotes, required this.releasePageUrl});
+}
+
+class UpdateChecker {
+  static const String repo = 'Tank-Jay/bss-gateway-monitor';
+  static String _currentVersion = '1.0.0';
+
+  static Future<void> init() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      _currentVersion = info.version;
+    } catch (_) {}
+  }
+
+  static String get currentVersion => _currentVersion;
+
+  static int _cmpVersion(String a, String b) {
+    final pa = a.replaceAll('v', '').split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    final pb = b.replaceAll('v', '').split('.').map((s) => int.tryParse(s) ?? 0).toList();
+    while (pa.length < 3) pa.add(0);
+    while (pb.length < 3) pb.add(0);
+    for (int i = 0; i < 3; i++) {
+      if (pa[i] != pb[i]) return pa[i].compareTo(pb[i]);
+    }
+    return 0;
+  }
+
+  static Future<UpdateInfo?> check() async {
+    try {
+      final resp = await http
+          .get(Uri.parse('https://api.github.com/repos/$repo/releases/latest'))
+          .timeout(const Duration(seconds: 8));
+      if (resp.statusCode != 200) return null;
+      final data = json.decode(resp.body) as Map<String, dynamic>;
+      final tag = (data['tag_name'] as String?) ?? '';
+      final notes = (data['body'] as String?) ?? '';
+      final htmlUrl = (data['html_url'] as String?) ?? '';
+      final assets = (data['assets'] as List?) ?? [];
+      String? apk;
+      for (final a in assets) {
+        final name = (a['name'] as String?) ?? '';
+        if (name.endsWith('.apk')) {
+          apk = a['browser_download_url'] as String?;
+          break;
+        }
+      }
+      if (apk == null || tag.isEmpty) return null;
+      if (_cmpVersion(tag, _currentVersion) <= 0) return null;
+      return UpdateInfo(latestVersion: tag, apkUrl: apk, releaseNotes: notes, releasePageUrl: htmlUrl);
+    } catch (_) {
+      return null;
+    }
   }
 }
 
@@ -825,15 +892,27 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _ble = BleService();
   int _tabIdx = 0;
+  UpdateInfo? _update;
 
   @override
   void initState() {
     super.initState();
     _ble.addListener(_refresh);
     if (widget.startInDemoMode) {
-      // Auto-enter demo after first frame
       WidgetsBinding.instance.addPostFrameCallback((_) => _ble.enterDemoMode());
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkForUpdate());
+  }
+
+  Future<void> _checkForUpdate() async {
+    final info = await UpdateChecker.check();
+    if (info != null && mounted) setState(() => _update = info);
+  }
+
+  Future<void> _openUpdate() async {
+    if (_update == null) return;
+    final uri = Uri.parse(_update!.apkUrl);
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   @override
@@ -940,7 +1019,33 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
       ),
-      body: pages[_tabIdx],
+      body: Column(children: [
+        if (_update != null)
+          Material(
+            color: Palette.accent,
+            child: InkWell(
+              onTap: _openUpdate,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Row(children: [
+                  Icon(Icons.system_update, color: Palette.bg, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Update available: ${_update!.latestVersion} — tap to download',
+                      style: TextStyle(color: Palette.bg, fontSize: 12, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                  GestureDetector(
+                    onTap: () => setState(() => _update = null),
+                    child: Icon(Icons.close, color: Palette.bg, size: 18),
+                  ),
+                ]),
+              ),
+            ),
+          ),
+        Expanded(child: pages[_tabIdx]),
+      ]),
       bottomNavigationBar: BottomNavigationBar(
         type: BottomNavigationBarType.fixed,
         backgroundColor: Palette.card,
@@ -1075,33 +1180,9 @@ class DashboardTab extends StatelessWidget {
                 childAspectRatio: 1.7,
                 children: [
                   _DataItem(label: 'Station ID', value: '${s['station_id'] ?? '--'}', color: Palette.accent),
-                  _DataItem(label: 'Version', value: '${s['version'] ?? '--'}', color: Palette.accent),
-                  Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Palette.dataBg, borderRadius: BorderRadius.circular(8)),
-                    child: Column(children: [
-                      Text('WIFI', style: TextStyle(fontSize: 10, color: Palette.textDim)),
-                      const SizedBox(height: 4),
-                      _statusBadge(s['wifi'] as String?),
-                      Text('${s['wifi_ssid'] ?? ''}', style: TextStyle(fontSize: 10, color: Palette.textDim)),
-                    ]),
-                  ),
-                  Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Palette.dataBg, borderRadius: BorderRadius.circular(8)),
-                    child: Column(children: [
-                      Text('MQTT', style: TextStyle(fontSize: 10, color: Palette.textDim)),
-                      const SizedBox(height: 4),
-                      _statusBadge(s['mqtt'] as String?),
-                      Text('broker', style: TextStyle(fontSize: 10, color: Palette.textDim)),
-                    ]),
-                  ),
-                  Container(padding: const EdgeInsets.all(10), decoration: BoxDecoration(color: Palette.dataBg, borderRadius: BorderRadius.circular(8)),
-                    child: Column(children: [
-                      Text('SD CARD', style: TextStyle(fontSize: 10, color: Palette.textDim)),
-                      const SizedBox(height: 4),
-                      _statusBadge(s['sd'] as String?),
-                      Text('storage', style: TextStyle(fontSize: 10, color: Palette.textDim)),
-                    ]),
-                  ),
                   _DataItem(label: 'Slaves', value: '${s['slaves'] ?? '--'}', unit: 'pods', color: Palette.cap),
-                  _DataItem(label: 'Free Heap', value: s['free_heap'] != null ? ((s['free_heap'] as num)/1024).toStringAsFixed(1) : '--', unit: 'KB', color: Palette.cap),
+                  _DataItem(label: 'MAC', value: '${s['mac'] ?? '--'}', color: Palette.volt),
+                  _DataItem(label: 'IP', value: '${s['ip'] ?? '--'}', color: Palette.volt),
                   _DataItem(label: 'Faults', value: '0x${(s['fault'] as num? ?? 0).toInt().toRadixString(16).toUpperCase().padLeft(2,'0')}',
                     color: (s['fault'] as num? ?? 0) == 0 ? Palette.success : Palette.danger),
                 ],
@@ -1266,9 +1347,9 @@ class PodDetailTab extends StatelessWidget {
                 _DataItem(label: 'Pack I', value: (d['pack_i'] as num?)?.toStringAsFixed(2) ?? '--', unit: 'A', color: Palette.curr),
                 _DataItem(label: 'SOH', value: '${d['soh'] ?? '--'}', unit: '%', color: Palette.soh),
                 _DataItem(label: 'Cycles', value: '${d['cycles'] ?? '--'}', unit: 'count', color: Palette.cycle),
-                _DataItem(label: 'Min Cell', value: '${d['min_cv'] ?? '--'}', unit: 'mV', color: Palette.volt),
-                _DataItem(label: 'Max Cell', value: '${d['max_cv'] ?? '--'}', unit: 'mV', color: Palette.volt),
-                _DataItem(label: 'Avail Cap', value: '${d['avail_cap'] ?? '--'}', unit: 'mAh', color: Palette.cap),
+                _DataItem(label: 'Min Cell', value: (d['min_cv'] is num) ? ((d['min_cv'] as num) / 1000).toStringAsFixed(3) : '--', unit: 'V', color: Palette.volt),
+                _DataItem(label: 'Max Cell', value: (d['max_cv'] is num) ? ((d['max_cv'] as num) / 1000).toStringAsFixed(3) : '--', unit: 'V', color: Palette.volt),
+                _DataItem(label: 'Avail Cap', value: (d['avail_cap'] is num) ? ((d['avail_cap'] as num) / 1000).toStringAsFixed(3) : '--', unit: 'Ah', color: Palette.cap),
                 _DataItem(label: 'Relay', value: '${d['relay'] ?? '--'}', unit: 'state', color: Palette.text),
               ],
             ),
@@ -1318,7 +1399,7 @@ class PodDetailTab extends StatelessWidget {
     final vMin = vals.where((v) => v > 0).fold<int>(99999, (a,b) => a < b ? a : b);
     final vMax = vals.fold<int>(0, (a,b) => a > b ? a : b);
     return _Card(
-      title: const Text('CELL VOLTAGES (mV)'),
+      title: const Text('CELL VOLTAGES (V)'),
       child: GridView.count(
         crossAxisCount: 4, shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
         mainAxisSpacing: 6, crossAxisSpacing: 6, childAspectRatio: 1.6,
@@ -1334,7 +1415,7 @@ class PodDetailTab extends StatelessWidget {
             ),
             child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
               Text('C${i+1}', style: TextStyle(fontSize: 10, color: Palette.textDim, fontWeight: FontWeight.w600)),
-              Text('$mv', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color, fontFamily: 'monospace')),
+              Text((mv / 1000).toStringAsFixed(3), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color, fontFamily: 'monospace')),
             ]),
           );
         }),
