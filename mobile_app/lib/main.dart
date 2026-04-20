@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -218,8 +219,17 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  void _goHome() {
-    Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => const HomeScreen()));
+  void _goHome({bool demo = false}) {
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(builder: (_) => HomeScreen(startInDemoMode: demo)),
+    );
+  }
+
+  void _doDemo() async {
+    // Skip auth in demo mode — just pass through
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('bss_auth', true);
+    _goHome(demo: true);
   }
 
   @override
@@ -271,7 +281,34 @@ class _LoginScreenState extends State<LoginScreen> {
                     padding: const EdgeInsets.only(top: 12),
                     child: Text(_err, style: TextStyle(color: Palette.danger, fontSize: 13)),
                   ),
-                const SizedBox(height: 18),
+                const SizedBox(height: 10),
+                // Divider with "OR"
+                Row(children: [
+                  Expanded(child: Container(height: 1, color: Palette.border)),
+                  Padding(padding: const EdgeInsets.symmetric(horizontal: 10),
+                    child: Text('OR', style: TextStyle(color: Palette.textDim, fontSize: 10, fontWeight: FontWeight.w700))),
+                  Expanded(child: Container(height: 1, color: Palette.border)),
+                ]),
+                const SizedBox(height: 10),
+                // Demo Mode button
+                SizedBox(
+                  width: double.infinity,
+                  height: 44,
+                  child: OutlinedButton.icon(
+                    onPressed: _doDemo,
+                    icon: Icon(Icons.science_outlined, size: 18, color: Palette.warn),
+                    label: Text('TRY DEMO MODE',
+                      style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 1.5, fontSize: 13, color: Palette.warn)),
+                    style: OutlinedButton.styleFrom(
+                      side: BorderSide(color: Palette.warn),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text('Explore the app without an ESP32 device',
+                  style: TextStyle(fontSize: 10, color: Palette.textDim), textAlign: TextAlign.center),
+                const SizedBox(height: 14),
                 Text('v1.0 · BSS IoT Gateway ESP32-S3',
                   style: TextStyle(fontSize: 11, color: Palette.textDim, letterSpacing: 1)),
               ],
@@ -490,6 +527,7 @@ class BleService extends ChangeNotifier {
   }
 
   Future<void> disconnect() async {
+    if (demoMode) { exitDemoMode(); return; }
     try { await device?.disconnect(); } catch (_) {}
     _cleanup();
   }
@@ -504,6 +542,15 @@ class BleService extends ChangeNotifier {
   }
 
   Future<void> readStationInfo() async {
+    if (demoMode) {
+      log(LogType.tx, 'READ Station Info (demo)');
+      await Future.delayed(const Duration(milliseconds: 200));
+      stationInfo = _buildDemoStationInfo();
+      readCount++;
+      log(LogType.rx, 'STATION (demo)');
+      notifyListeners();
+      return;
+    }
     if (charStation == null) return;
     try {
       log(LogType.tx, 'READ Station Info');
@@ -519,6 +566,10 @@ class BleService extends ChangeNotifier {
   Future<void> selectPod(int n) async {
     selectedPod = n;
     notifyListeners();
+    if (demoMode) {
+      log(LogType.tx, 'Pod Select: $n (demo)');
+      return;
+    }
     if (charSelect == null) return;
     try {
       await charSelect!.write(utf8.encode('$n'), withoutResponse: false);
@@ -527,6 +578,15 @@ class BleService extends ChangeNotifier {
   }
 
   Future<void> readPodDetail() async {
+    if (demoMode) {
+      log(LogType.tx, 'READ Pod $selectedPod Detail (demo)');
+      await Future.delayed(const Duration(milliseconds: 200));
+      podDetail = _buildDemoPodDetail(selectedPod);
+      readCount++;
+      log(LogType.rx, 'DETAIL (demo)');
+      notifyListeners();
+      return;
+    }
     if (charSelect != null) {
       try { await charSelect!.write(utf8.encode('$selectedPod'), withoutResponse: false); } catch (_) {}
     }
@@ -543,6 +603,14 @@ class BleService extends ChangeNotifier {
   }
 
   Future<void> sendCommand(String cmd) async {
+    if (demoMode) {
+      log(LogType.tx, 'CMD: $cmd (demo)');
+      await Future.delayed(const Duration(milliseconds: 300));
+      lastCmdResponse = '{"cmd":"$cmd","status":"ok","msg":"demo - no real action"}';
+      log(LogType.rx, 'RESPONSE: $lastCmdResponse');
+      notifyListeners();
+      return;
+    }
     if (charCommand == null) return;
     try {
       await charCommand!.write(utf8.encode(cmd), withoutResponse: false);
@@ -558,6 +626,14 @@ class BleService extends ChangeNotifier {
   /// Ask firmware to send current params. Response arrives via onResponseNotify
   /// which calls _handleParamsResponse() if op=="params".
   Future<void> requestParams() async {
+    if (demoMode) {
+      log(LogType.tx, 'get_params (demo)');
+      await Future.delayed(const Duration(milliseconds: 200));
+      params = {'op': 'params', ..._demoParams};
+      log(LogType.rx, 'RESPONSE: params (demo)');
+      notifyListeners();
+      return;
+    }
     if (charCommand == null) { log(LogType.err, 'Not connected'); return; }
     try {
       await charCommand!.write(utf8.encode('{"op":"get_params"}'), withoutResponse: false);
@@ -567,6 +643,15 @@ class BleService extends ChangeNotifier {
 
   /// Write a single param. App layer should call requestParams() after to refresh.
   Future<void> setParam(String key, String value) async {
+    if (demoMode) {
+      _demoParams[key] = (key == 'mqtt_port') ? int.tryParse(value) ?? 1883 : value;
+      log(LogType.tx, 'set $key (demo)');
+      await Future.delayed(const Duration(milliseconds: 200));
+      lastCmdResponse = '{"op":"set_param","key":"$key","status":"ok"}';
+      log(LogType.rx, 'RESPONSE: ok');
+      notifyListeners();
+      return;
+    }
     if (charCommand == null) { log(LogType.err, 'Not connected'); return; }
     try {
       final payload = json.encode({'op': 'set_param', 'key': key, 'value': value});
@@ -576,6 +661,14 @@ class BleService extends ChangeNotifier {
   }
 
   Future<void> saveAndReboot() async {
+    if (demoMode) {
+      log(LogType.tx, 'save_reboot (demo)');
+      await Future.delayed(const Duration(milliseconds: 300));
+      lastCmdResponse = '{"op":"save_reboot","status":"ok","msg":"demo - simulated"}';
+      log(LogType.rx, 'RESPONSE: ok');
+      notifyListeners();
+      return;
+    }
     if (charCommand == null) return;
     try {
       await charCommand!.write(utf8.encode('{"op":"save_reboot"}'), withoutResponse: false);
@@ -594,6 +687,118 @@ class BleService extends ChangeNotifier {
     readCount = 0;
     notifyListeners();
   }
+
+  // ══════════════════════════════════════════════════════════════
+  //  DEMO MODE — Simulate an ESP32 for UI testing (no hardware needed)
+  // ══════════════════════════════════════════════════════════════
+  bool demoMode = false;
+  Timer? _demoSummaryTimer;
+  final _demoRng = math.Random();
+
+  /// Editable mock params (simulate NVS) — persist within session only.
+  final Map<String, dynamic> _demoParams = {
+    'wifi_ssid': 'DemoNetwork',
+    'wifi_pass': '***',
+    'mqtt_host': 'broker.demo.com',
+    'mqtt_port': 1883,
+    'mqtt_user': 'demo_user',
+    'mqtt_pass': '***',
+  };
+
+  /// Enter demo mode: fake a successful connection and start simulated data.
+  Future<void> enterDemoMode() async {
+    demoMode = true;
+    deviceName = 'DEMO_BSS_IDR001';
+    _setState(ConnectionState.connecting);
+    log(LogType.info, 'DEMO MODE — no real BLE');
+
+    await Future.delayed(const Duration(milliseconds: 500));
+    log(LogType.info, 'Simulated GATT connected');
+    await Future.delayed(const Duration(milliseconds: 300));
+    log(LogType.info, 'Simulated 6 characteristics discovered');
+
+    _setState(ConnectionState.connected);
+    stationInfo = _buildDemoStationInfo();
+
+    // Start 1-second auto-push of Pod Summary
+    _demoSummaryTimer?.cancel();
+    _demoSummaryTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      podSummary = _buildDemoPodSummary();
+      readCount++;
+      log(LogType.rx, 'SUMMARY (demo)');
+      notifyListeners();
+    });
+
+    // Emit first summary immediately
+    podSummary = _buildDemoPodSummary();
+    notifyListeners();
+  }
+
+  void exitDemoMode() {
+    _demoSummaryTimer?.cancel();
+    _demoSummaryTimer = null;
+    demoMode = false;
+    _cleanup();
+    _setState(ConnectionState.disconnected);
+  }
+
+  Map<String, dynamic> _buildDemoStationInfo() => {
+    'station_id': 'IDR001-DEMO',
+    'version': '1.2.3',
+    'fw_date': '18.04.2026',
+    'mac': '28:37:2F:81:BD:79',
+    'ip': '192.168.1.101',
+    'wifi_ssid': _demoParams['wifi_ssid'],
+    'wifi_rssi': -45 - _demoRng.nextInt(10),
+    'wifi': 'yes',
+    'mqtt': 'yes',
+    'sd': 'yes',
+    'slaves': 3,
+    'free_heap': 96000 + _demoRng.nextInt(4000),
+    'fault': 0,
+  };
+
+  Map<String, dynamic> _buildDemoPodSummary() {
+    final t = DateTime.now().millisecondsSinceEpoch / 1000.0;
+    return {
+      'station_id': 'IDR001-DEMO',
+      'total_pods': 3,
+      'pods': List.generate(3, (i) {
+        final phase = t + i * 2.1;
+        return {
+          'pod': i + 1,
+          'v': 48.5 + math.sin(phase) * 0.5,
+          'i': ((i - 1) * 2.5 + math.sin(phase * 1.3) * 1.0),
+          'soc': (70 - i * 10 + math.sin(phase / 8) * 3).round(),
+          'soh': 98 - i * 2,
+          'temp': 32.0 + i * 3.0 + math.sin(phase / 6) * 1.5,
+          'relay': 1,
+        };
+      }),
+    };
+  }
+
+  Map<String, dynamic> _buildDemoPodDetail(int podNum) {
+    final t = DateTime.now().millisecondsSinceEpoch / 1000.0;
+    final phase = t + podNum * 2.1;
+    final baseV = 3300 + _demoRng.nextInt(100);
+    return {
+      'pod': podNum,
+      'pack_v': 48.5 + math.sin(phase) * 0.5,
+      'pack_i': ((podNum - 2) * 2.5 + math.sin(phase * 1.3) * 1.0),
+      'soc': (70 - (podNum - 1) * 10 + math.sin(phase / 8) * 3).round(),
+      'soh': 98 - (podNum - 1) * 2,
+      'min_cv': baseV - 30,
+      'max_cv': baseV + 30,
+      'avail_cap': 48000 + _demoRng.nextInt(2000),
+      'relay': 1,
+      'cycles': 142 + podNum * 23,
+      'pod_temp': 32.0 + (podNum - 1) * 3.0 + math.sin(phase / 6) * 1.5,
+      'cells': List.generate(16, (_) => baseV + _demoRng.nextInt(60) - 30),
+      'temps': List.generate(6, (i) => 30.0 + i * 1.5 + math.sin(phase + i) * 2),
+      'pdu_temps': List.generate(4, (i) => 35.0 + i * 2 + math.sin(phase + i) * 1.5),
+    };
+  }
 }
 
 enum ConnectionState { disconnected, scanning, connecting, connected }
@@ -611,7 +816,8 @@ class LogEntry {
 //  Home Screen (Tabs)
 // ══════════════════════════════════════════════════════════════
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final bool startInDemoMode;
+  const HomeScreen({super.key, this.startInDemoMode = false});
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
@@ -624,6 +830,10 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _ble.addListener(_refresh);
+    if (widget.startInDemoMode) {
+      // Auto-enter demo after first frame
+      WidgetsBinding.instance.addPostFrameCallback((_) => _ble.enterDemoMode());
+    }
   }
 
   @override
@@ -686,8 +896,22 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('BSS Gateway',
-                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900, color: Palette.accent, letterSpacing: 1)),
+                  Row(children: [
+                    Text('BSS Gateway',
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w900, color: Palette.accent, letterSpacing: 1)),
+                    if (_ble.demoMode) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Palette.warn,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text('DEMO',
+                          style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Colors.black, letterSpacing: 1)),
+                      ),
+                    ],
+                  ]),
                   Text(_ble.deviceName ?? 'Not Connected',
                     style: TextStyle(fontSize: 11, color: Palette.textDim)),
                 ],
