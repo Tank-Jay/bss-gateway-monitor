@@ -1181,15 +1181,23 @@ class DashboardTab extends StatelessWidget {
                 children: [
                   _DataItem(label: 'Station ID', value: '${s['station_id'] ?? '--'}', color: Palette.accent),
                   _DataItem(label: 'Slaves', value: '${s['slaves'] ?? '--'}', unit: 'pods', color: Palette.cap),
-                  _DataItem(label: 'MAC', value: '${s['mac'] ?? '--'}', color: Palette.volt),
                   _DataItem(label: 'IP', value: '${s['ip'] ?? '--'}', color: Palette.volt),
                   _DataItem(label: 'Faults', value: '0x${(s['fault'] as num? ?? 0).toInt().toRadixString(16).toUpperCase().padLeft(2,'0')}',
                     color: (s['fault'] as num? ?? 0) == 0 ? Palette.success : Palette.danger),
                 ],
               ),
-              const SizedBox(height: 10),
-              Text('${s['mac'] ?? '--'}  ·  ${s['ip'] ?? '--'}  ·  ${s['wifi_rssi'] ?? '--'} dBm',
-                style: TextStyle(fontSize: 11, color: Palette.textDim, fontFamily: 'monospace'), textAlign: TextAlign.center),
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(color: Palette.dataBg, borderRadius: BorderRadius.circular(8)),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('MAC', style: TextStyle(fontSize: 10, color: Palette.textDim, fontWeight: FontWeight.w700, letterSpacing: 1)),
+                  const SizedBox(height: 4),
+                  Text('${s['mac'] ?? '--'}',
+                    style: TextStyle(fontSize: 14, color: Palette.volt, fontWeight: FontWeight.w700, fontFamily: 'monospace')),
+                ]),
+              ),
             ]),
           ),
           _Card(
@@ -1571,8 +1579,6 @@ class SettingsTab extends StatelessWidget {
                 _paramRow(context, 'WiFi Password', 'wifi_pass', ble.params!['wifi_pass'], Icons.lock, true),
                 _paramRow(context, 'MQTT Host', 'mqtt_host', ble.params!['mqtt_host'], Icons.cloud, false),
                 _paramRow(context, 'MQTT Port', 'mqtt_port', '${ble.params!['mqtt_port'] ?? '--'}', Icons.numbers, false, isNumeric: true),
-                _paramRow(context, 'MQTT User', 'mqtt_user', ble.params!['mqtt_user'], Icons.person, false),
-                _paramRow(context, 'MQTT Password', 'mqtt_pass', ble.params!['mqtt_pass'], Icons.lock, true),
                 const SizedBox(height: 10),
                 SizedBox(
                   width: double.infinity,
