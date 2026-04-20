@@ -376,11 +376,22 @@ class UpdateChecker {
 
   static String get currentVersion => _currentVersion;
 
+  static List<int> _parseVersion(String v) {
+    // "v1.0.2-build8" -> [1, 0, 2];  "1.0.1" -> [1, 0, 1]
+    var s = v.trim();
+    if (s.startsWith('v') || s.startsWith('V')) s = s.substring(1);
+    final dash = s.indexOf('-');
+    if (dash >= 0) s = s.substring(0, dash);
+    final plus = s.indexOf('+');
+    if (plus >= 0) s = s.substring(0, plus);
+    final parts = s.split('.').map((p) => int.tryParse(p.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0).toList();
+    while (parts.length < 3) parts.add(0);
+    return parts;
+  }
+
   static int _cmpVersion(String a, String b) {
-    final pa = a.replaceAll('v', '').split('.').map((s) => int.tryParse(s) ?? 0).toList();
-    final pb = b.replaceAll('v', '').split('.').map((s) => int.tryParse(s) ?? 0).toList();
-    while (pa.length < 3) pa.add(0);
-    while (pb.length < 3) pb.add(0);
+    final pa = _parseVersion(a);
+    final pb = _parseVersion(b);
     for (int i = 0; i < 3; i++) {
       if (pa[i] != pb[i]) return pa[i].compareTo(pb[i]);
     }

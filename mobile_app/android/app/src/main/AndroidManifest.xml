@@ -1,6 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Internet (GitHub update checker) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- BLE permissions — Android 12+ (API 31+) -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
                      android:usesPermissionFlags="neverForLocation"
