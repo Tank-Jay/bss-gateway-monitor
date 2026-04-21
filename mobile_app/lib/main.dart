@@ -953,9 +953,16 @@ class DashboardTab extends StatelessWidget {
     final s = ble.stationInfo;
     final p = ble.podSummary;
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(12),
-      child: Column(
+    return RefreshIndicator(
+      color: Palette.accent,
+      backgroundColor: Palette.card,
+      onRefresh: () async {
+        await ble.readStationInfo();
+      },
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(12),
+        child: Column(
         children: [
           if (s != null)
             Padding(
@@ -1014,6 +1021,7 @@ class DashboardTab extends StatelessWidget {
             ),
           ),
         ],
+      ),
       ),
     );
   }
@@ -1106,9 +1114,14 @@ class PodDetailTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final d = ble.podDetail;
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(12),
-      child: Column(children: [
+    return RefreshIndicator(
+      color: Palette.accent,
+      backgroundColor: Palette.card,
+      onRefresh: () => ble.readPodDetail(),
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
         _Card(
           title: const Text('SELECT POD'),
           action: GestureDetector(
@@ -1171,6 +1184,7 @@ class PodDetailTab extends StatelessWidget {
             child: Text('Select pod, tap READ', style: TextStyle(color: Palette.textDim, letterSpacing: 1), textAlign: TextAlign.center),
           ),
       ]),
+      ),
     );
   }
 

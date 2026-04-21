@@ -53,6 +53,10 @@ jobs:
         working-directory: ./mobile_app
         run: flutter pub get
 
+      - name: Generate launcher icons
+        working-directory: ./mobile_app
+        run: dart run flutter_launcher_icons
+
       - name: Decode release keystore
         working-directory: ./mobile_app/android/app
         env:

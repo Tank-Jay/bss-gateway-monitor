@@ -1,7 +1,7 @@
 name: bss_gateway_monitor
 description: BSS IoT Gateway BLE Monitor — ESP32-S3
 publish_to: 'none'
-version: 1.0.7+8
+version: 1.0.8+9
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -20,6 +20,18 @@ dependencies:
 
 dev_dependencies:
   flutter_lints: ^3.0.0
+  flutter_launcher_icons: ^0.13.1
+
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: false
+  image_path: "assets/app_icon.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#0b1220"
+  adaptive_icon_foreground: "assets/app_icon_foreground.png"
+  remove_alpha_ios: false
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/app_icon.png
