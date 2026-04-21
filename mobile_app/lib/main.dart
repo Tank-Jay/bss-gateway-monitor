@@ -128,6 +128,20 @@ Future<void> toggleTheme(ThemeMode mode) async {
   await prefs.setString('bss_theme', mode == ThemeMode.light ? 'light' : 'dark');
 }
 
+// Developer mode — gates visibility of the Log tab (verbose BLE traffic).
+final ValueNotifier<bool> devModeNotifier = ValueNotifier(false);
+
+Future<void> loadDevMode() async {
+  final prefs = await SharedPreferences.getInstance();
+  devModeNotifier.value = prefs.getBool('bss_dev_mode') ?? false;
+}
+
+Future<void> setDevMode(bool v) async {
+  devModeNotifier.value = v;
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setBool('bss_dev_mode', v);
+}
+
 // ══════════════════════════════════════════════════════════════
 //  Alarm thresholds — persist via SharedPreferences
 // ══════════════════════════════════════════════════════════════
@@ -260,6 +274,7 @@ List<String> evaluateAlarms(Map<String, dynamic>? podSummary) {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await loadSavedTheme();
+  await loadDevMode();
   await alarmThresholds.load();
   await UpdateChecker.init();
   runApp(const BssApp());
@@ -899,12 +914,23 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final pages = [
+    return ValueListenableBuilder<bool>(
+      valueListenable: devModeNotifier,
+      builder: (_, devMode, __) => _buildHome(devMode),
+    );
+  }
+
+  Widget _buildHome(bool devMode) {
+    // Build tabs: Log is inserted only when Developer Mode is on.
+    final pages = <Widget>[
       DashboardTab(ble: _ble),
       PodDetailTab(ble: _ble),
-      LogTab(ble: _ble),
+      if (devMode) LogTab(ble: _ble),
       SettingsTab(ble: _ble),
     ];
+
+    // Clamp current index if dev mode was just turned off and we were on Log.
+    if (_tabIdx >= pages.length) _tabIdx = pages.length - 1;
 
     return Scaffold(
       backgroundColor: Palette.bg,
@@ -984,11 +1010,12 @@ class _HomeScreenState extends State<HomeScreen> {
         onTap: (i) => setState(() => _tabIdx = i),
         selectedLabelStyle: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700),
         unselectedLabelStyle: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700),
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.dashboard_outlined, size: 20), activeIcon: Icon(Icons.dashboard, size: 20), label: 'Dashboard'),
-          BottomNavigationBarItem(icon: Icon(Icons.battery_charging_full_outlined, size: 20), activeIcon: Icon(Icons.battery_charging_full, size: 20), label: 'Pods'),
-          BottomNavigationBarItem(icon: Icon(Icons.list_alt_outlined, size: 20), activeIcon: Icon(Icons.list_alt, size: 20), label: 'Log'),
-          BottomNavigationBarItem(icon: Icon(Icons.person_outlined, size: 20), activeIcon: Icon(Icons.person, size: 20), label: 'Profile'),
+        items: [
+          const BottomNavigationBarItem(icon: Icon(Icons.dashboard_outlined, size: 20), activeIcon: Icon(Icons.dashboard, size: 20), label: 'Dashboard'),
+          const BottomNavigationBarItem(icon: Icon(Icons.battery_charging_full_outlined, size: 20), activeIcon: Icon(Icons.battery_charging_full, size: 20), label: 'Pods'),
+          if (devMode)
+            const BottomNavigationBarItem(icon: Icon(Icons.list_alt_outlined, size: 20), activeIcon: Icon(Icons.list_alt, size: 20), label: 'Log'),
+          const BottomNavigationBarItem(icon: Icon(Icons.person_outlined, size: 20), activeIcon: Icon(Icons.person, size: 20), label: 'Profile'),
         ],
       ),
     );
@@ -1700,6 +1727,36 @@ class SettingsTab extends StatelessWidget {
                 alarmThresholds.cellDeltaMv = v;
                 alarmThresholds.save();
               }),
+            ]),
+          ),
+        ),
+
+        // Developer mode (gates Log tab visibility)
+        _Card(
+          title: const Text('DEVELOPER'),
+          child: ValueListenableBuilder<bool>(
+            valueListenable: devModeNotifier,
+            builder: (_, on, __) => Row(children: [
+              Container(
+                width: 34, height: 34,
+                decoration: BoxDecoration(color: Palette.textDim.withOpacity(0.15), borderRadius: BorderRadius.circular(8)),
+                child: Icon(Icons.developer_mode, size: 18, color: Palette.textDim),
+              ),
+              const SizedBox(width: 10),
+              Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Developer Mode',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
+                  Text('Show Log tab with raw BLE traffic',
+                    style: TextStyle(fontSize: 11, color: Palette.textDim)),
+                ],
+              )),
+              Switch(
+                value: on,
+                activeColor: Palette.accent,
+                onChanged: (v) => setDevMode(v),
+              ),
             ]),
           ),
         ),
