@@ -1875,7 +1875,7 @@ class SettingsTab extends StatelessWidget {
           ),
         ),
 
-        // Developer mode (gates Log tab visibility)
+        // Developer mode (password-gated; gates Log tab visibility)
         _Card(
           title: const Text('DEVELOPER'),
           child: ValueListenableBuilder<bool>(
@@ -1884,7 +1884,7 @@ class SettingsTab extends StatelessWidget {
               Container(
                 width: 34, height: 34,
                 decoration: BoxDecoration(color: Palette.textDim.withOpacity(0.15), borderRadius: BorderRadius.circular(8)),
-                child: Icon(Icons.developer_mode, size: 18, color: Palette.textDim),
+                child: Icon(on ? Icons.lock_open : Icons.lock_outline, size: 18, color: on ? Palette.accent : Palette.textDim),
               ),
               const SizedBox(width: 10),
               Expanded(child: Column(
@@ -1892,14 +1892,21 @@ class SettingsTab extends StatelessWidget {
                 children: [
                   const Text('Developer Mode',
                     style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
-                  Text('Show Log tab with raw BLE traffic',
+                  Text(on ? 'Unlocked — Log tab visible' : 'Password required to enable',
                     style: TextStyle(fontSize: 11, color: Palette.textDim)),
                 ],
               )),
               Switch(
                 value: on,
                 activeColor: Palette.accent,
-                onChanged: (v) => setDevMode(v),
+                onChanged: (v) {
+                  if (!v) {
+                    // Disabling doesn't need a password
+                    setDevMode(false);
+                  } else {
+                    _promptDevPassword(context);
+                  }
+                },
               ),
             ]),
           ),
@@ -1983,6 +1990,59 @@ class SettingsTab extends StatelessWidget {
           style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, fontFamily: 'monospace'))),
       ]),
     );
+  }
+
+  Future<void> _promptDevPassword(BuildContext context) async {
+    const correct = 'Jay@2526';
+    final ctrl = TextEditingController();
+    String? err;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          backgroundColor: Palette.card,
+          title: Row(children: [
+            Icon(Icons.lock_outline, color: Palette.accent, size: 20),
+            const SizedBox(width: 8),
+            const Text('Developer Access'),
+          ]),
+          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Enter password to enable Developer Mode and show the Log tab.',
+              style: TextStyle(fontSize: 12, color: Palette.textDim)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctrl,
+              obscureText: true,
+              autofocus: true,
+              onSubmitted: (_) {
+                if (ctrl.text == correct) { Navigator.pop(ctx, true); }
+                else { setLocal(() => err = 'Incorrect password'); }
+              },
+              decoration: InputDecoration(
+                hintText: 'Password',
+                errorText: err,
+                filled: true,
+                fillColor: Palette.dataBg,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+            ),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            TextButton(
+              onPressed: () {
+                if (ctrl.text == correct) { Navigator.pop(ctx, true); }
+                else { setLocal(() => err = 'Incorrect password'); }
+              },
+              child: const Text('Unlock'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok == true) {
+      await setDevMode(true);
+    }
   }
 
   Widget _cmdButton(BuildContext ctx, String label, Color color, VoidCallback onTap) => SizedBox(
