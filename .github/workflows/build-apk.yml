@@ -53,6 +53,60 @@ jobs:
         working-directory: ./mobile_app
         run: flutter pub get
 
+      - name: Decode release keystore
+        working-directory: ./mobile_app/android/app
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > release.jks
+            echo "Keystore decoded ($(wc -c < release.jks) bytes)"
+          else
+            echo "No keystore secret — using debug signing (apps will not upgrade in-place)"
+          fi
+
+      - name: Configure release signing in build.gradle
+        working-directory: ./mobile_app/android/app
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PW: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "Skipping release signing config"
+            exit 0
+          fi
+          # Inject signingConfigs + release buildType into build.gradle
+          python3 <<'PY'
+          import os, re, pathlib
+          p = pathlib.Path("build.gradle")
+          src = p.read_text()
+          store_pw = os.environ['STORE_PW']
+          key_pw = os.environ['KEY_PW']
+          key_alias = os.environ['KEY_ALIAS']
+          signing_block = f"""
+              signingConfigs {{
+                  release {{
+                      storeFile file("release.jks")
+                      storePassword "{store_pw}"
+                      keyAlias "{key_alias}"
+                      keyPassword "{key_pw}"
+                  }}
+              }}
+          """
+          # Inject signingConfigs before buildTypes
+          src = re.sub(r"(\s*buildTypes\s*\{)", signing_block + r"\1", src, count=1)
+          # Replace the debug signingConfig in release buildType
+          src = src.replace(
+              "signingConfig signingConfigs.debug",
+              "signingConfig signingConfigs.release"
+          )
+          p.write_text(src)
+          print("build.gradle patched for release signing")
+          PY
+          grep -A 2 "signingConfigs" build.gradle | head -20
+
       - name: Build release APK
         working-directory: ./mobile_app
         run: flutter build apk --release
