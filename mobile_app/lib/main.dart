@@ -7,9 +7,12 @@ import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:path_provider/path_provider.dart';
 
 // ══════════════════════════════════════════════════════════════
 //  BLE UUIDs — must match BLE_handler.h
@@ -126,11 +129,138 @@ Future<void> toggleTheme(ThemeMode mode) async {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  Alarm thresholds — persist via SharedPreferences
+// ══════════════════════════════════════════════════════════════
+class AlarmThresholds {
+  static final ValueNotifier<AlarmThresholds> notifier = ValueNotifier(AlarmThresholds());
+
+  double overTempC = 55.0;    // pod temp above this → OVER TEMP alarm
+  double underSocPct = 15.0;  // pod SOC below this → LOW SOC alarm
+  double cellDeltaMv = 200.0; // max-min cell delta above this → IMBALANCE alarm
+  bool enabled = true;
+
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    overTempC    = prefs.getDouble('alarm_over_temp')   ?? 55.0;
+    underSocPct  = prefs.getDouble('alarm_under_soc')   ?? 15.0;
+    cellDeltaMv  = prefs.getDouble('alarm_cell_delta')  ?? 200.0;
+    enabled      = prefs.getBool('alarm_enabled')        ?? true;
+    notifier.value = this;
+  }
+
+  Future<void> save() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('alarm_over_temp',  overTempC);
+    await prefs.setDouble('alarm_under_soc',  underSocPct);
+    await prefs.setDouble('alarm_cell_delta', cellDeltaMv);
+    await prefs.setBool('alarm_enabled',       enabled);
+    // Force notifier to rebuild listeners
+    notifier.value = AlarmThresholds()
+      ..overTempC   = overTempC
+      ..underSocPct = underSocPct
+      ..cellDeltaMv = cellDeltaMv
+      ..enabled     = enabled;
+  }
+}
+
+final AlarmThresholds alarmThresholds = AlarmThresholds();
+
+// ══════════════════════════════════════════════════════════════
+//  Exporter — save station snapshot as JSON / CSV and share
+// ══════════════════════════════════════════════════════════════
+class Exporter {
+  /// Build a full snapshot (station info + pod summary + pod detail) as JSON string.
+  static String buildJson(BleService ble) {
+    final snap = {
+      'exported_at':  DateTime.now().toIso8601String(),
+      'app_version':  UpdateChecker.currentVersion,
+      'station_info': ble.stationInfo,
+      'pod_summary':  ble.podSummary,
+      'selected_pod': ble.selectedPod,
+      'pod_detail':   ble.podDetail,
+    };
+    const enc = JsonEncoder.withIndent('  ');
+    return enc.convert(snap);
+  }
+
+  /// Pod Summary as CSV (one row per pod).
+  static String buildCsv(BleService ble) {
+    final pods = (ble.podSummary?['pods'] as List?) ?? const [];
+    final sb = StringBuffer();
+    sb.writeln('# Exported at ${DateTime.now().toIso8601String()}');
+    sb.writeln('# Station: ${ble.stationInfo?['station_id'] ?? '--'}');
+    sb.writeln('pod,voltage_V,current_A,soc_pct,soh_pct,temp_C,relay');
+    for (final raw in pods) {
+      if (raw is! Map) continue;
+      final p = raw as Map<String, dynamic>;
+      sb.writeln([
+        p['pod'] ?? '',
+        p['v'] ?? '',
+        p['i'] ?? '',
+        p['soc'] ?? '',
+        p['soh'] ?? '',
+        p['temp'] ?? '',
+        p['relay'] ?? '',
+      ].join(','));
+    }
+    return sb.toString();
+  }
+
+  static String _fileStem(BleService ble) {
+    final sid = (ble.stationInfo?['station_id'] ?? 'BSS').toString().replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '');
+    final ts = DateTime.now().toIso8601String().replaceAll(':', '-').split('.').first;
+    return 'BSS_${sid}_$ts';
+  }
+
+  /// Write file and share via Android share sheet.
+  static Future<void> share(BleService ble, {required bool asCsv}) async {
+    final content = asCsv ? buildCsv(ble) : buildJson(ble);
+    final ext = asCsv ? 'csv' : 'json';
+    final stem = _fileStem(ble);
+    final dir = await getTemporaryDirectory();
+    final path = '${dir.path}/$stem.$ext';
+    final f = File(path);
+    await f.writeAsString(content);
+    await Share.shareXFiles(
+      [XFile(path, mimeType: asCsv ? 'text/csv' : 'application/json')],
+      subject: 'BSS Gateway snapshot $stem',
+    );
+  }
+}
+
+/// Check current Pod Summary against thresholds. Returns list of alarm strings
+/// (empty if no alarms).
+List<String> evaluateAlarms(Map<String, dynamic>? podSummary) {
+  if (podSummary == null) return const [];
+  if (!alarmThresholds.enabled) return const [];
+  final pods = podSummary['pods'];
+  if (pods is! List) return const [];
+
+  final alarms = <String>[];
+  for (final raw in pods) {
+    if (raw is! Map) continue;
+    final pod = raw as Map<String, dynamic>;
+    final podNum = pod['pod'];
+    final temp   = (pod['temp'] as num?)?.toDouble();
+    final soc    = (pod['soc']  as num?)?.toDouble();
+
+    if (temp != null && temp > alarmThresholds.overTempC) {
+      alarms.add('POD $podNum: OVER TEMP ${temp.toStringAsFixed(1)}°C');
+    }
+    if (soc != null && soc < alarmThresholds.underSocPct) {
+      alarms.add('POD $podNum: LOW SOC ${soc.toStringAsFixed(0)}%');
+    }
+  }
+  return alarms;
+}
+
+// ══════════════════════════════════════════════════════════════
 //  Main
 // ══════════════════════════════════════════════════════════════
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await loadSavedTheme();
+  await alarmThresholds.load();
   await UpdateChecker.init();
   runApp(const BssApp());
 }
@@ -952,6 +1082,7 @@ class DashboardTab extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = ble.stationInfo;
     final p = ble.podSummary;
+    final alarms = evaluateAlarms(p);
 
     return RefreshIndicator(
       color: Palette.accent,
@@ -964,6 +1095,28 @@ class DashboardTab extends StatelessWidget {
         padding: const EdgeInsets.all(12),
         child: Column(
         children: [
+          if (alarms.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Palette.danger.withOpacity(0.15),
+                border: Border.all(color: Palette.danger, width: 1.5),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Icon(Icons.warning_amber_rounded, color: Palette.danger, size: 18),
+                  const SizedBox(width: 6),
+                  Text('${alarms.length} ACTIVE ALARM${alarms.length > 1 ? "S" : ""}',
+                    style: TextStyle(color: Palette.danger, fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 1)),
+                ]),
+                const SizedBox(height: 6),
+                for (final a in alarms)
+                  Text('• $a',
+                    style: TextStyle(color: Palette.text, fontSize: 12, fontFamily: 'monospace')),
+              ]),
+            ),
           if (s != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
@@ -1020,6 +1173,30 @@ class DashboardTab extends StatelessWidget {
               ],
             ),
           ),
+          const SizedBox(height: 8),
+          Row(children: [
+            Expanded(child: OutlinedButton.icon(
+              onPressed: () => Exporter.share(ble, asCsv: false),
+              icon: Icon(Icons.code, size: 16, color: Palette.accent),
+              label: Text('Export JSON',
+                style: TextStyle(fontSize: 12, color: Palette.accent, fontWeight: FontWeight.w700)),
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: Palette.accent),
+                padding: const EdgeInsets.symmetric(vertical: 10),
+              ),
+            )),
+            const SizedBox(width: 8),
+            Expanded(child: OutlinedButton.icon(
+              onPressed: () => Exporter.share(ble, asCsv: true),
+              icon: Icon(Icons.table_chart_outlined, size: 16, color: Palette.accent),
+              label: Text('Export CSV',
+                style: TextStyle(fontSize: 12, color: Palette.accent, fontWeight: FontWeight.w700)),
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: Palette.accent),
+                padding: const EdgeInsets.symmetric(vertical: 10),
+              ),
+            )),
+          ]),
         ],
       ),
       ),
@@ -1107,13 +1284,62 @@ class _LiveDotState extends State<_LiveDot> with SingleTickerProviderStateMixin 
 // ══════════════════════════════════════════════════════════════
 //  Pod Detail Tab
 // ══════════════════════════════════════════════════════════════
-class PodDetailTab extends StatelessWidget {
+class PodDetailTab extends StatefulWidget {
   final BleService ble;
   const PodDetailTab({super.key, required this.ble});
+  @override
+  State<PodDetailTab> createState() => _PodDetailTabState();
+}
+
+class _PodDetailTabState extends State<PodDetailTab> {
+  late final PageController _pageCtrl = PageController(initialPage: widget.ble.selectedPod - 1);
+  int _lastSelected = 0;
+
+  @override
+  void dispose() {
+    _pageCtrl.dispose();
+    super.dispose();
+  }
+
+  void _onPageChanged(int idx) {
+    final pod = idx + 1;
+    if (widget.ble.selectedPod != pod) {
+      widget.ble.selectPod(pod);
+      widget.ble.readPodDetail();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final ble = widget.ble;
     final d = ble.podDetail;
+
+    // Sync PageController if something else changed the selected pod
+    if (_lastSelected != ble.selectedPod) {
+      _lastSelected = ble.selectedPod;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_pageCtrl.hasClients && _pageCtrl.page?.round() != ble.selectedPod - 1) {
+          _pageCtrl.animateToPage(
+            ble.selectedPod - 1,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOut,
+          );
+        }
+      });
+    }
+
+    return PageView.builder(
+      controller: _pageCtrl,
+      itemCount: 5,
+      onPageChanged: _onPageChanged,
+      itemBuilder: (_, idx) => _buildPodPage(context, idx + 1, d),
+    );
+  }
+
+  Widget _buildPodPage(BuildContext context, int podNum, Map<String, dynamic>? d) {
+    final ble = widget.ble;
+    // Only show data if it's for the currently-viewed pod
+    final data = (ble.selectedPod == podNum) ? d : null;
     return RefreshIndicator(
       color: Palette.accent,
       backgroundColor: Palette.card,
@@ -1123,7 +1349,7 @@ class PodDetailTab extends StatelessWidget {
         padding: const EdgeInsets.all(12),
         child: Column(children: [
         _Card(
-          title: const Text('SELECT POD'),
+          title: Text('POD $podNum OF 5'),
           action: GestureDetector(
             onTap: () => ble.readPodDetail(),
             child: Container(
@@ -1132,60 +1358,60 @@ class PodDetailTab extends StatelessWidget {
               child: Text('READ', style: TextStyle(fontSize: 10, color: Palette.accent, fontWeight: FontWeight.w700)),
             ),
           ),
-          child: Row(children: List.generate(5, (i) {
-            final n = i + 1;
-            final active = ble.selectedPod == n;
-            return Expanded(child: Padding(
-              padding: EdgeInsets.only(right: i < 4 ? 4 : 0),
-              child: GestureDetector(
-                onTap: () => ble.selectPod(n),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: List.generate(5, (i) {
+              final active = podNum == (i + 1);
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
                 child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  width: active ? 24 : 8,
+                  height: 8,
                   decoration: BoxDecoration(
-                    color: active ? Palette.accent : Palette.dataBg,
-                    border: Border.all(color: active ? Palette.accent : Palette.border),
-                    borderRadius: BorderRadius.circular(8),
+                    color: active ? Palette.accent : Palette.border,
+                    borderRadius: BorderRadius.circular(4),
                   ),
-                  child: Text('$n',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700,
-                      color: active ? Colors.black : Palette.textDim)),
                 ),
-              ),
-            ));
-          })),
-        ),
-        if (d != null) ...[
-          _socBar(d),
-          _Card(
-            title: const Text('TELEMETRY'),
-            child: GridView.count(
-              crossAxisCount: 2, shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
-              mainAxisSpacing: 8, crossAxisSpacing: 8, childAspectRatio: 1.7,
-              children: [
-                _DataItem(label: 'Pack V', value: (d['pack_v'] as num?)?.toStringAsFixed(3) ?? '--', unit: 'V', color: Palette.volt),
-                _DataItem(label: 'Pack I', value: (d['pack_i'] as num?)?.toStringAsFixed(2) ?? '--', unit: 'A', color: Palette.curr),
-                _DataItem(label: 'SOH', value: '${d['soh'] ?? '--'}', unit: '%', color: Palette.soh),
-                _DataItem(label: 'Cycles', value: '${d['cycles'] ?? '--'}', unit: 'count', color: Palette.cycle),
-                _DataItem(label: 'Min Cell', value: (d['min_cv'] is num) ? ((d['min_cv'] as num) / 1000).toStringAsFixed(3) : '--', unit: 'V', color: Palette.volt),
-                _DataItem(label: 'Max Cell', value: (d['max_cv'] is num) ? ((d['max_cv'] as num) / 1000).toStringAsFixed(3) : '--', unit: 'V', color: Palette.volt),
-                _DataItem(label: 'Avail Cap', value: (d['avail_cap'] is num) ? (d['avail_cap'] as num).toStringAsFixed(1) : '--', unit: 'Ah', color: Palette.cap),
-                _DataItem(label: 'Relay', value: '${d['relay'] ?? '--'}', unit: 'state', color: Palette.text),
-              ],
-            ),
+              );
+            }),
           ),
-          if (d['cells'] is List) _cellsCard(d['cells'] as List),
-          if (d['temps'] is List) _tempsCard('NTC TEMPERATURES', d['temps'] as List, 'T'),
-          if (d['pdu_temps'] is List) _tempsCard('PDU TEMPERATURES', d['pdu_temps'] as List, 'PDU'),
-          _Card(child: _DataItem(label: 'Pod NTC Temp', value: (d['pod_temp'] as num?)?.toStringAsFixed(1) ?? '--', unit: 'C', color: Palette.temp)),
-        ] else
+        ),
+        if (data != null) ..._buildPodBody(data)
+        else
           Container(
             padding: const EdgeInsets.all(40),
-            child: Text('Select pod, tap READ', style: TextStyle(color: Palette.textDim, letterSpacing: 1), textAlign: TextAlign.center),
+            child: Text('Swipe or tap READ', style: TextStyle(color: Palette.textDim, letterSpacing: 1), textAlign: TextAlign.center),
           ),
       ]),
       ),
     );
+  }
+
+  List<Widget> _buildPodBody(Map<String, dynamic> d) {
+    return [
+      _socBar(d),
+      _Card(
+        title: const Text('TELEMETRY'),
+        child: GridView.count(
+          crossAxisCount: 2, shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
+          mainAxisSpacing: 8, crossAxisSpacing: 8, childAspectRatio: 1.7,
+          children: [
+            _DataItem(label: 'Pack V', value: (d['pack_v'] as num?)?.toStringAsFixed(3) ?? '--', unit: 'V', color: Palette.volt),
+            _DataItem(label: 'Pack I', value: (d['pack_i'] as num?)?.toStringAsFixed(2) ?? '--', unit: 'A', color: Palette.curr),
+            _DataItem(label: 'SOH', value: '${d['soh'] ?? '--'}', unit: '%', color: Palette.soh),
+            _DataItem(label: 'Cycles', value: '${d['cycles'] ?? '--'}', unit: 'count', color: Palette.cycle),
+            _DataItem(label: 'Min Cell', value: (d['min_cv'] is num) ? ((d['min_cv'] as num) / 1000).toStringAsFixed(3) : '--', unit: 'V', color: Palette.volt),
+            _DataItem(label: 'Max Cell', value: (d['max_cv'] is num) ? ((d['max_cv'] as num) / 1000).toStringAsFixed(3) : '--', unit: 'V', color: Palette.volt),
+            _DataItem(label: 'Avail Cap', value: (d['avail_cap'] is num) ? (d['avail_cap'] as num).toStringAsFixed(1) : '--', unit: 'Ah', color: Palette.cap),
+            _DataItem(label: 'Relay', value: '${d['relay'] ?? '--'}', unit: 'state', color: Palette.text),
+          ],
+        ),
+      ),
+      if (d['cells'] is List) _cellsCard(d['cells'] as List),
+      if (d['temps'] is List) _tempsCard('NTC TEMPERATURES', d['temps'] as List, 'T'),
+      if (d['pdu_temps'] is List) _tempsCard('PDU TEMPERATURES', d['pdu_temps'] as List, 'PDU'),
+      _Card(child: _DataItem(label: 'Pod NTC Temp', value: (d['pod_temp'] as num?)?.toStringAsFixed(1) ?? '--', unit: 'C', color: Palette.temp)),
+    ];
   }
 
   Widget _socBar(Map<String, dynamic> d) {
@@ -1443,6 +1669,41 @@ class SettingsTab extends StatelessWidget {
           ),
         ),
 
+        // Alarm thresholds
+        _Card(
+          title: const Text('ALARM THRESHOLDS'),
+          child: ValueListenableBuilder<AlarmThresholds>(
+            valueListenable: AlarmThresholds.notifier,
+            builder: (_, a, __) => Column(children: [
+              Row(children: [
+                Expanded(child: Text('Enable alarms',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                Switch(
+                  value: a.enabled,
+                  activeColor: Palette.accent,
+                  onChanged: (v) {
+                    alarmThresholds.enabled = v;
+                    alarmThresholds.save();
+                  },
+                ),
+              ]),
+              const SizedBox(height: 6),
+              _thresholdRow(context, 'Over temp', '°C', a.overTempC, 40, 80, (v) {
+                alarmThresholds.overTempC = v;
+                alarmThresholds.save();
+              }),
+              _thresholdRow(context, 'Low SOC', '%', a.underSocPct, 5, 50, (v) {
+                alarmThresholds.underSocPct = v;
+                alarmThresholds.save();
+              }),
+              _thresholdRow(context, 'Cell delta', 'mV', a.cellDeltaMv, 50, 500, (v) {
+                alarmThresholds.cellDeltaMv = v;
+                alarmThresholds.save();
+              }),
+            ]),
+          ),
+        ),
+
         // Control commands
         _Card(
           title: const Text('REMOTE CONTROL'),
@@ -1500,6 +1761,28 @@ class SettingsTab extends StatelessWidget {
       Text(label.toUpperCase(), style: TextStyle(fontSize: 10, color: Palette.textDim)),
     ]),
   );
+
+  Widget _thresholdRow(BuildContext context, String label, String unit, double value,
+      double min, double max, ValueChanged<double> onChanged) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(children: [
+        SizedBox(width: 90, child: Text(label,
+          style: TextStyle(fontSize: 12, color: Palette.textDim, fontWeight: FontWeight.w600))),
+        Expanded(child: Slider(
+          min: min,
+          max: max,
+          value: value.clamp(min, max),
+          activeColor: Palette.accent,
+          inactiveColor: Palette.border,
+          onChanged: onChanged,
+        )),
+        SizedBox(width: 70, child: Text('${value.toStringAsFixed(0)} $unit',
+          textAlign: TextAlign.right,
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, fontFamily: 'monospace'))),
+      ]),
+    );
+  }
 
   Widget _cmdButton(BuildContext ctx, String label, Color color, VoidCallback onTap) => SizedBox(
     width: double.infinity,
