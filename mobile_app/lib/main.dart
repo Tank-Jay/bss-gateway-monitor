@@ -143,6 +143,43 @@ Future<void> setDevMode(bool v) async {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  Alarm thresholds — persist via SharedPreferences
+// ══════════════════════════════════════════════════════════════
+class AlarmThresholds {
+  static final ValueNotifier<AlarmThresholds> notifier = ValueNotifier(AlarmThresholds());
+
+  double overTempC = 55.0;
+  double underSocPct = 15.0;
+  double cellDeltaMv = 200.0;
+  bool enabled = true;
+
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    overTempC    = prefs.getDouble('alarm_over_temp')  ?? 55.0;
+    underSocPct  = prefs.getDouble('alarm_under_soc')  ?? 15.0;
+    cellDeltaMv  = prefs.getDouble('alarm_cell_delta') ?? 200.0;
+    enabled      = prefs.getBool('alarm_enabled')      ?? true;
+    notifier.value = this;
+  }
+
+  Future<void> save() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('alarm_over_temp',  overTempC);
+    await prefs.setDouble('alarm_under_soc',  underSocPct);
+    await prefs.setDouble('alarm_cell_delta', cellDeltaMv);
+    await prefs.setBool('alarm_enabled',       enabled);
+    // Force notifier to rebuild listeners with fresh instance
+    notifier.value = AlarmThresholds()
+      ..overTempC   = overTempC
+      ..underSocPct = underSocPct
+      ..cellDeltaMv = cellDeltaMv
+      ..enabled     = enabled;
+  }
+}
+
+final AlarmThresholds alarmThresholds = AlarmThresholds();
+
+// ══════════════════════════════════════════════════════════════
 //  Exporter — save station snapshot as JSON / CSV and share
 // ══════════════════════════════════════════════════════════════
 class Exporter {
@@ -212,6 +249,7 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await loadSavedTheme();
   await loadDevMode();
+  await alarmThresholds.load();
   await UpdateChecker.init();
   runApp(const BssApp());
 }
@@ -1609,6 +1647,41 @@ class SettingsTab extends StatelessWidget {
           ),
         ),
 
+        // Alarm thresholds (no dashboard banner — values just persisted here)
+        _Card(
+          title: const Text('ALARM THRESHOLDS'),
+          child: ValueListenableBuilder<AlarmThresholds>(
+            valueListenable: AlarmThresholds.notifier,
+            builder: (_, a, __) => Column(children: [
+              Row(children: [
+                Expanded(child: Text('Enable alarms',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                Switch(
+                  value: a.enabled,
+                  activeColor: Palette.accent,
+                  onChanged: (v) {
+                    alarmThresholds.enabled = v;
+                    alarmThresholds.save();
+                  },
+                ),
+              ]),
+              const SizedBox(height: 6),
+              _thresholdRow(context, 'Over temp', '°C', a.overTempC, 40, 80, (v) {
+                alarmThresholds.overTempC = v;
+                alarmThresholds.save();
+              }),
+              _thresholdRow(context, 'Low SOC', '%', a.underSocPct, 5, 50, (v) {
+                alarmThresholds.underSocPct = v;
+                alarmThresholds.save();
+              }),
+              _thresholdRow(context, 'Cell delta', 'mV', a.cellDeltaMv, 50, 500, (v) {
+                alarmThresholds.cellDeltaMv = v;
+                alarmThresholds.save();
+              }),
+            ]),
+          ),
+        ),
+
         // Developer mode (gates Log tab visibility)
         _Card(
           title: const Text('DEVELOPER'),
@@ -1696,6 +1769,28 @@ class SettingsTab extends StatelessWidget {
       Text(label.toUpperCase(), style: TextStyle(fontSize: 10, color: Palette.textDim)),
     ]),
   );
+
+  Widget _thresholdRow(BuildContext context, String label, String unit, double value,
+      double min, double max, ValueChanged<double> onChanged) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(children: [
+        SizedBox(width: 90, child: Text(label,
+          style: TextStyle(fontSize: 12, color: Palette.textDim, fontWeight: FontWeight.w600))),
+        Expanded(child: Slider(
+          min: min,
+          max: max,
+          value: value.clamp(min, max),
+          activeColor: Palette.accent,
+          inactiveColor: Palette.border,
+          onChanged: onChanged,
+        )),
+        SizedBox(width: 70, child: Text('${value.toStringAsFixed(0)} $unit',
+          textAlign: TextAlign.right,
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, fontFamily: 'monospace'))),
+      ]),
+    );
+  }
 
   Widget _cmdButton(BuildContext ctx, String label, Color color, VoidCallback onTap) => SizedBox(
     width: double.infinity,
