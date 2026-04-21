@@ -65,8 +65,8 @@ jobs:
             echo "No keystore secret — using debug signing (apps will not upgrade in-place)"
           fi
 
-      - name: Configure release signing in build.gradle
-        working-directory: ./mobile_app/android/app
+      - name: Write key.properties (password file)
+        working-directory: ./mobile_app/android
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           STORE_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -74,73 +74,108 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
           if [ -z "$KEYSTORE_BASE64" ]; then
-            echo "Skipping release signing config"
+            echo "Skipping — no keystore secret"
+            exit 0
+          fi
+          # Write passwords to key.properties file (Gradle reads raw lines, no string escaping)
+          cat > key.properties <<EOF
+          storeFile=release.jks
+          storePassword=${STORE_PW}
+          keyAlias=${KEY_ALIAS}
+          keyPassword=${KEY_PW}
+          EOF
+          echo "key.properties written ($(wc -c < key.properties) bytes)"
+
+      - name: Configure release signing in build.gradle.kts
+        working-directory: ./mobile_app/android/app
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "Skipping signing config patch"
             exit 0
           fi
           ls -la
           python3 <<'PY'
-          import os, re, pathlib, sys
-          # Flutter 3.x uses build.gradle.kts (Kotlin DSL); older uses build.gradle (Groovy)
+          import pathlib, re, sys
           kts = pathlib.Path("build.gradle.kts")
           groovy = pathlib.Path("build.gradle")
-          store_pw = os.environ['STORE_PW']
-          key_pw = os.environ['KEY_PW']
-          key_alias = os.environ['KEY_ALIAS']
 
           if kts.exists():
               src = kts.read_text()
-              block = f'''
-              signingConfigs {{
-                  create("release") {{
-                      storeFile = file("release.jks")
-                      storePassword = "{store_pw}"
-                      keyAlias = "{key_alias}"
-                      keyPassword = "{key_pw}"
-                  }}
-              }}
+              # Top-of-file: load key.properties
+              loader = '''import java.util.Properties
+          import java.io.FileInputStream
+
+          val keystorePropertiesFile = rootProject.file("key.properties")
+          val keystoreProperties = Properties()
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(FileInputStream(keystorePropertiesFile))
+          }
+
           '''
-              # Inject block just before `buildTypes {`
-              new_src = re.sub(r"(\n\s*buildTypes\s*\{)", block + r"\1", src, count=1)
-              # Repoint release buildType to our signing config
-              new_src = new_src.replace(
+              # signingConfigs block referencing properties
+              block = '''
+              signingConfigs {
+                  create("release") {
+                      keyAlias = keystoreProperties["keyAlias"] as String
+                      keyPassword = keystoreProperties["keyPassword"] as String
+                      storeFile = file(keystoreProperties["storeFile"] as String)
+                      storePassword = keystoreProperties["storePassword"] as String
+                  }
+              }
+          '''
+              # Insert loader at top of file (before plugins block or any other content)
+              new_src = loader + src
+              # Inject signingConfigs just before buildTypes
+              new_src2 = re.sub(r"(\n\s*buildTypes\s*\{)", block + r"\1", new_src, count=1)
+              # Repoint release buildType
+              new_src3 = new_src2.replace(
                   'signingConfig = signingConfigs.getByName("debug")',
                   'signingConfig = signingConfigs.getByName("release")'
               )
-              if new_src == src:
-                  print("WARNING: no substitutions made to build.gradle.kts", file=sys.stderr)
-                  print(src)
+              if new_src3 == new_src:
+                  print("WARNING: no signing substitution occurred", file=sys.stderr)
+                  print(new_src)
                   sys.exit(1)
-              kts.write_text(new_src)
-              print("Patched build.gradle.kts (Kotlin DSL)")
+              kts.write_text(new_src3)
+              print("Patched build.gradle.kts (Kotlin DSL, reads key.properties)")
           elif groovy.exists():
               src = groovy.read_text()
-              block = f'''
-              signingConfigs {{
-                  release {{
-                      storeFile file("release.jks")
-                      storePassword "{store_pw}"
-                      keyAlias "{key_alias}"
-                      keyPassword "{key_pw}"
-                  }}
-              }}
+              loader = '''def keystoreProperties = new Properties()
+          def keystorePropertiesFile = rootProject.file("key.properties")
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+          }
+
           '''
-              new_src = re.sub(r"(\n\s*buildTypes\s*\{)", block + r"\1", src, count=1)
-              new_src = new_src.replace(
+              block = '''
+              signingConfigs {
+                  release {
+                      keyAlias keystoreProperties["keyAlias"]
+                      keyPassword keystoreProperties["keyPassword"]
+                      storeFile keystoreProperties["storeFile"] ? file(keystoreProperties["storeFile"]) : null
+                      storePassword keystoreProperties["storePassword"]
+                  }
+              }
+          '''
+              new_src = loader + src
+              new_src2 = re.sub(r"(\n\s*buildTypes\s*\{)", block + r"\1", new_src, count=1)
+              new_src3 = new_src2.replace(
                   "signingConfig signingConfigs.debug",
                   "signingConfig signingConfigs.release"
               )
-              if new_src == src:
-                  print("WARNING: no substitutions made to build.gradle", file=sys.stderr)
-                  print(src)
+              if new_src3 == new_src:
+                  print("WARNING: no signing substitution occurred", file=sys.stderr)
+                  print(new_src)
                   sys.exit(1)
-              groovy.write_text(new_src)
-              print("Patched build.gradle (Groovy)")
+              groovy.write_text(new_src3)
+              print("Patched build.gradle (Groovy, reads key.properties)")
           else:
-              print("ERROR: no build.gradle or build.gradle.kts found", file=sys.stderr)
-              sys.exit(1)
+              print("ERROR: no gradle file", file=sys.stderr); sys.exit(1)
           PY
-          echo "---AFTER PATCH---"
-          [ -f build.gradle.kts ] && grep -B1 -A 10 "signingConfigs" build.gradle.kts || grep -B1 -A 10 "signingConfigs" build.gradle
+          echo "---AFTER PATCH (first 50 lines)---"
+          [ -f build.gradle.kts ] && head -50 build.gradle.kts || head -50 build.gradle
 
       - name: Build release APK
         working-directory: ./mobile_app
