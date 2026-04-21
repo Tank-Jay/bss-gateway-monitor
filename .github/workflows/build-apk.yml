@@ -57,6 +57,10 @@ jobs:
         working-directory: ./mobile_app
         run: dart run flutter_launcher_icons
 
+      - name: Generate native splash screen
+        working-directory: ./mobile_app
+        run: dart run flutter_native_splash:create
+
       - name: Decode release keystore
         working-directory: ./mobile_app/android/app
         env:
