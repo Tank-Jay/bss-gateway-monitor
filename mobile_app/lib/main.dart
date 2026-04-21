@@ -13,6 +13,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:fl_chart/fl_chart.dart';
 
 // ══════════════════════════════════════════════════════════════
 //  BLE UUIDs — must match BLE_handler.h
@@ -180,6 +181,90 @@ class AlarmThresholds {
 final AlarmThresholds alarmThresholds = AlarmThresholds();
 
 // ══════════════════════════════════════════════════════════════
+//  Known devices — remember BSS gateways by MAC with custom labels
+// ══════════════════════════════════════════════════════════════
+class KnownDevice {
+  final String mac;
+  String name;       // last-known advertised name (e.g. BSSX_IDR001)
+  String label;      // user-set label ("Warehouse A" etc.); empty = none
+  DateTime lastSeen;
+
+  KnownDevice({required this.mac, required this.name, required this.lastSeen, this.label = ''});
+
+  Map<String, dynamic> toJson() => {
+    'mac': mac, 'name': name, 'label': label,
+    'last_seen': lastSeen.toIso8601String(),
+  };
+
+  factory KnownDevice.fromJson(Map<String, dynamic> j) => KnownDevice(
+    mac: j['mac'] as String,
+    name: (j['name'] ?? '') as String,
+    label: (j['label'] ?? '') as String,
+    lastSeen: DateTime.tryParse(j['last_seen'] ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0),
+  );
+}
+
+class KnownDevicesStore {
+  static const _key = 'bss_known_devices';
+  static const int maxCount = 10;
+  static final ValueNotifier<List<KnownDevice>> notifier = ValueNotifier(<KnownDevice>[]);
+
+  static Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_key);
+    if (raw == null || raw.isEmpty) {
+      notifier.value = [];
+      return;
+    }
+    try {
+      final list = (json.decode(raw) as List).cast<Map<String, dynamic>>();
+      notifier.value = list.map(KnownDevice.fromJson).toList();
+    } catch (_) {
+      notifier.value = [];
+    }
+  }
+
+  static Future<void> _persist() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_key, json.encode(notifier.value.map((d) => d.toJson()).toList()));
+  }
+
+  /// Upsert (by MAC). Refreshes last_seen and name; preserves label.
+  static Future<void> remember({required String mac, required String name}) async {
+    final list = List<KnownDevice>.from(notifier.value);
+    final idx = list.indexWhere((d) => d.mac == mac);
+    if (idx >= 0) {
+      list[idx].name = name.isNotEmpty ? name : list[idx].name;
+      list[idx].lastSeen = DateTime.now();
+    } else {
+      list.insert(0, KnownDevice(mac: mac, name: name, lastSeen: DateTime.now()));
+    }
+    // Cap size — oldest (by last_seen) dropped first
+    if (list.length > maxCount) {
+      list.sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+      list.removeRange(maxCount, list.length);
+    }
+    notifier.value = list;
+    await _persist();
+  }
+
+  static Future<void> setLabel(String mac, String label) async {
+    final list = List<KnownDevice>.from(notifier.value);
+    final idx = list.indexWhere((d) => d.mac == mac);
+    if (idx < 0) return;
+    list[idx].label = label;
+    notifier.value = list;
+    await _persist();
+  }
+
+  static Future<void> forget(String mac) async {
+    final list = List<KnownDevice>.from(notifier.value)..removeWhere((d) => d.mac == mac);
+    notifier.value = list;
+    await _persist();
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
 //  Exporter — save station snapshot as JSON / CSV and share
 // ══════════════════════════════════════════════════════════════
 class Exporter {
@@ -250,6 +335,7 @@ void main() async {
   await loadSavedTheme();
   await loadDevMode();
   await alarmThresholds.load();
+  await KnownDevicesStore.load();
   await UpdateChecker.init();
   runApp(const BssApp());
 }
@@ -527,6 +613,33 @@ class BleService extends ChangeNotifier {
   Map<String, dynamic>? podDetail;
   String lastCmdResponse = 'Waiting for command...';
 
+  // ── Trend history: per-pod rolling buffer of {t, v, i, soc} samples ──
+  static const int _historyMax = 180;  // ~3 min at 1 Hz
+  final Map<int, List<PodSample>> _history = {};
+
+  List<PodSample> historyFor(int podNum) => _history[podNum] ?? const [];
+
+  void _recordSample(Map<String, dynamic>? summary) {
+    if (summary == null) return;
+    final pods = summary['pods'];
+    if (pods is! List) return;
+    final now = DateTime.now();
+    for (final raw in pods) {
+      if (raw is! Map) continue;
+      final p = raw as Map<String, dynamic>;
+      final num? podN = p['pod'] as num?;
+      if (podN == null) continue;
+      final buf = _history.putIfAbsent(podN.toInt(), () => <PodSample>[]);
+      buf.add(PodSample(
+        t:   now,
+        v:   (p['v']   as num?)?.toDouble() ?? 0,
+        i:   (p['i']   as num?)?.toDouble() ?? 0,
+        soc: (p['soc'] as num?)?.toDouble() ?? 0,
+      ));
+      if (buf.length > _historyMax) buf.removeAt(0);
+    }
+  }
+
   final List<LogEntry> logs = [];
   StreamSubscription<List<int>>? _summarySub, _responseSub;
   StreamSubscription<BluetoothConnectionState>? _connSub;
@@ -657,6 +770,7 @@ class BleService extends ChangeNotifier {
           final txt = utf8.decode(val);
           podSummary = json.decode(txt) as Map<String, dynamic>;
           readCount++;
+          _recordSample(podSummary);
           log(LogType.rx, 'SUMMARY (${txt.length}B)');
           notifyListeners();
         } catch (e) { log(LogType.err, 'Summary parse: $e'); }
@@ -686,6 +800,12 @@ class BleService extends ChangeNotifier {
 
       _setState(ConnectionState.connected);
       log(LogType.info, 'Connected successfully!');
+
+      // Remember this device so it shows up as quick-connect next time
+      KnownDevicesStore.remember(
+        mac: target.remoteId.str,
+        name: deviceName ?? '',
+      );
 
       // Auto-read station info
       Future.delayed(const Duration(milliseconds: 500), () => readStationInfo());
@@ -813,6 +933,14 @@ class LogEntry {
   final LogType type;
   final String msg;
   LogEntry(this.ts, this.type, this.msg);
+}
+
+class PodSample {
+  final DateTime t;
+  final double v;
+  final double i;
+  final double soc;
+  PodSample({required this.t, required this.v, required this.i, required this.soc});
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1354,7 +1482,7 @@ class _PodDetailTabState extends State<PodDetailTab> {
             }),
           ),
         ),
-        if (data != null) ..._buildPodBody(data)
+        if (data != null) ..._buildPodBody(podNum, data)
         else
           Container(
             padding: const EdgeInsets.all(40),
@@ -1365,7 +1493,8 @@ class _PodDetailTabState extends State<PodDetailTab> {
     );
   }
 
-  List<Widget> _buildPodBody(Map<String, dynamic> d) {
+  List<Widget> _buildPodBody(int podNum, Map<String, dynamic> d) {
+    final samples = widget.ble.historyFor(podNum);
     return [
       _socBar(d),
       _Card(
@@ -1389,7 +1518,71 @@ class _PodDetailTabState extends State<PodDetailTab> {
       if (d['temps'] is List) _tempsCard('NTC TEMPERATURES', d['temps'] as List, 'T'),
       if (d['pdu_temps'] is List) _tempsCard('PDU TEMPERATURES', d['pdu_temps'] as List, 'PDU'),
       _Card(child: _DataItem(label: 'Pod NTC Temp', value: (d['pod_temp'] as num?)?.toStringAsFixed(1) ?? '--', unit: 'C', color: Palette.temp)),
+      if (samples.length >= 2) _trendsCard(samples),
     ];
+  }
+
+  Widget _trendsCard(List<PodSample> samples) {
+    return _Card(
+      title: Text('TRENDS (last ${samples.length}s)'),
+      child: Column(children: [
+        _chart('Voltage', samples.map((s) => s.v).toList(),   'V', Palette.volt),
+        const SizedBox(height: 12),
+        _chart('Current', samples.map((s) => s.i).toList(),   'A', Palette.curr),
+        const SizedBox(height: 12),
+        _chart('SOC',     samples.map((s) => s.soc).toList(), '%', Palette.soc, minY: 0, maxY: 100),
+      ]),
+    );
+  }
+
+  Widget _chart(String label, List<double> values, String unit, Color color,
+      {double? minY, double? maxY}) {
+    if (values.isEmpty) return const SizedBox.shrink();
+    final spots = <FlSpot>[
+      for (int i = 0; i < values.length; i++) FlSpot(i.toDouble(), values[i]),
+    ];
+    final vMin = values.reduce((a, b) => a < b ? a : b);
+    final vMax = values.reduce((a, b) => a > b ? a : b);
+    // Auto-scale y-axis with small padding if caller didn't provide range
+    final double padLo = minY ?? (vMin - (vMax - vMin).abs() * 0.1 - 0.01);
+    final double padHi = maxY ?? (vMax + (vMax - vMin).abs() * 0.1 + 0.01);
+    final last = values.last;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Text(label, style: TextStyle(fontSize: 10, color: Palette.textDim, fontWeight: FontWeight.w700, letterSpacing: 1)),
+        const Spacer(),
+        Text('${last.toStringAsFixed(2)} $unit',
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color, fontFamily: 'monospace')),
+      ]),
+      const SizedBox(height: 4),
+      SizedBox(
+        height: 70,
+        child: LineChart(LineChartData(
+          minX: 0,
+          maxX: (values.length - 1).toDouble(),
+          minY: padLo,
+          maxY: padHi,
+          gridData: const FlGridData(show: false),
+          titlesData: const FlTitlesData(show: false),
+          borderData: FlBorderData(show: false),
+          lineTouchData: const LineTouchData(enabled: false),
+          lineBarsData: [
+            LineChartBarData(
+              spots: spots,
+              isCurved: false,
+              color: color,
+              barWidth: 1.5,
+              isStrokeCapRound: true,
+              dotData: const FlDotData(show: false),
+              belowBarData: BarAreaData(
+                show: true,
+                color: color.withOpacity(0.15),
+              ),
+            ),
+          ],
+        )),
+      ),
+    ]);
   }
 
   Widget _socBar(Map<String, dynamic> d) {
@@ -2103,6 +2296,33 @@ class _DevicePickerSheetState extends State<DevicePickerSheet> {
             ),
           ]),
         ),
+        // Known devices section — tap to quick-connect, long-press to edit/remove
+        ValueListenableBuilder<List<KnownDevice>>(
+          valueListenable: KnownDevicesStore.notifier,
+          builder: (_, known, __) {
+            if (known.isEmpty) return const SizedBox.shrink();
+            // Sort by last_seen desc, but ever-seen devices we also have live in scan
+            // should appear with a "nearby" indicator.
+            final liveMacs = _devices.keys.toSet();
+            final sorted = List<KnownDevice>.from(known)
+              ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+            return Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('KNOWN DEVICES (${known.length})',
+                    style: TextStyle(fontSize: 10, color: Palette.textDim, fontWeight: FontWeight.w700, letterSpacing: 1)),
+                  const SizedBox(height: 6),
+                  ...sorted.map((d) {
+                    final live = liveMacs.contains(d.mac);
+                    return _knownDeviceTile(d, live);
+                  }),
+                ],
+              ),
+            );
+          },
+        ),
         // Scan indicator
         if (_scanning)
           Container(
@@ -2140,6 +2360,111 @@ class _DevicePickerSheetState extends State<DevicePickerSheet> {
         ),
       ]),
     );
+  }
+
+  Widget _knownDeviceTile(KnownDevice d, bool live) {
+    final title = d.label.isNotEmpty ? d.label : (d.name.isNotEmpty ? d.name : d.mac);
+    final sub = d.label.isNotEmpty ? '${d.name} · ${d.mac}' : d.mac;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      decoration: BoxDecoration(
+        color: Palette.dataBg,
+        border: Border.all(color: live ? Palette.success : Palette.border),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: () => _quickConnect(d),
+          onLongPress: () => _showKnownDeviceMenu(d),
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Row(children: [
+              Icon(live ? Icons.bluetooth_connected : Icons.bluetooth,
+                size: 20, color: live ? Palette.success : Palette.accent),
+              const SizedBox(width: 10),
+              Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Palette.text)),
+                  Text(sub, style: TextStyle(fontSize: 10, color: Palette.textDim, fontFamily: 'monospace')),
+                ],
+              )),
+              if (live)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(color: Palette.success, borderRadius: BorderRadius.circular(4)),
+                  child: const Text('NEARBY', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Colors.black, letterSpacing: 1)),
+                )
+              else
+                Icon(Icons.more_vert, size: 18, color: Palette.textDim),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _quickConnect(KnownDevice d) async {
+    // If device is currently being advertised, connect directly.
+    final hit = _devices[d.mac];
+    if (hit != null) {
+      await _onDeviceTap(hit);
+      return;
+    }
+    // Otherwise, use flutter_blue_plus's BluetoothDevice from MAC string (fromId).
+    _scanSub?.cancel();
+    await widget.ble.stopScanning();
+    if (!mounted) return;
+    Navigator.pop(context);
+    final bd = BluetoothDevice.fromId(d.mac);
+    await widget.ble.connectToDevice(bd);
+  }
+
+  void _showKnownDeviceMenu(KnownDevice d) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Palette.card,
+      builder: (_) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        ListTile(
+          leading: Icon(Icons.edit, color: Palette.accent),
+          title: const Text('Edit label'),
+          onTap: () { Navigator.pop(context); _showLabelDialog(d); },
+        ),
+        ListTile(
+          leading: Icon(Icons.delete_outline, color: Palette.danger),
+          title: const Text('Forget device'),
+          onTap: () async {
+            Navigator.pop(context);
+            await KnownDevicesStore.forget(d.mac);
+          },
+        ),
+      ])),
+    );
+  }
+
+  Future<void> _showLabelDialog(KnownDevice d) async {
+    final ctrl = TextEditingController(text: d.label);
+    final newLabel = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: Palette.card,
+        title: const Text('Edit label'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'e.g. Warehouse A'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          TextButton(onPressed: () => Navigator.pop(context, ctrl.text.trim()), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (newLabel != null) {
+      await KnownDevicesStore.setLabel(d.mac, newLabel);
+    }
   }
 
   Widget _deviceTile(ScanResult r) {
