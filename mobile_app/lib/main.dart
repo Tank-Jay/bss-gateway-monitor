@@ -143,43 +143,6 @@ Future<void> setDevMode(bool v) async {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  Alarm thresholds — persist via SharedPreferences
-// ══════════════════════════════════════════════════════════════
-class AlarmThresholds {
-  static final ValueNotifier<AlarmThresholds> notifier = ValueNotifier(AlarmThresholds());
-
-  double overTempC = 55.0;    // pod temp above this → OVER TEMP alarm
-  double underSocPct = 15.0;  // pod SOC below this → LOW SOC alarm
-  double cellDeltaMv = 200.0; // max-min cell delta above this → IMBALANCE alarm
-  bool enabled = true;
-
-  Future<void> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    overTempC    = prefs.getDouble('alarm_over_temp')   ?? 55.0;
-    underSocPct  = prefs.getDouble('alarm_under_soc')   ?? 15.0;
-    cellDeltaMv  = prefs.getDouble('alarm_cell_delta')  ?? 200.0;
-    enabled      = prefs.getBool('alarm_enabled')        ?? true;
-    notifier.value = this;
-  }
-
-  Future<void> save() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble('alarm_over_temp',  overTempC);
-    await prefs.setDouble('alarm_under_soc',  underSocPct);
-    await prefs.setDouble('alarm_cell_delta', cellDeltaMv);
-    await prefs.setBool('alarm_enabled',       enabled);
-    // Force notifier to rebuild listeners
-    notifier.value = AlarmThresholds()
-      ..overTempC   = overTempC
-      ..underSocPct = underSocPct
-      ..cellDeltaMv = cellDeltaMv
-      ..enabled     = enabled;
-  }
-}
-
-final AlarmThresholds alarmThresholds = AlarmThresholds();
-
-// ══════════════════════════════════════════════════════════════
 //  Exporter — save station snapshot as JSON / CSV and share
 // ══════════════════════════════════════════════════════════════
 class Exporter {
@@ -242,32 +205,6 @@ class Exporter {
   }
 }
 
-/// Check current Pod Summary against thresholds. Returns list of alarm strings
-/// (empty if no alarms).
-List<String> evaluateAlarms(Map<String, dynamic>? podSummary) {
-  if (podSummary == null) return const [];
-  if (!alarmThresholds.enabled) return const [];
-  final pods = podSummary['pods'];
-  if (pods is! List) return const [];
-
-  final alarms = <String>[];
-  for (final raw in pods) {
-    if (raw is! Map) continue;
-    final pod = raw as Map<String, dynamic>;
-    final podNum = pod['pod'];
-    final temp   = (pod['temp'] as num?)?.toDouble();
-    final soc    = (pod['soc']  as num?)?.toDouble();
-
-    if (temp != null && temp > alarmThresholds.overTempC) {
-      alarms.add('POD $podNum: OVER TEMP ${temp.toStringAsFixed(1)}°C');
-    }
-    if (soc != null && soc < alarmThresholds.underSocPct) {
-      alarms.add('POD $podNum: LOW SOC ${soc.toStringAsFixed(0)}%');
-    }
-  }
-  return alarms;
-}
-
 // ══════════════════════════════════════════════════════════════
 //  Main
 // ══════════════════════════════════════════════════════════════
@@ -275,7 +212,6 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await loadSavedTheme();
   await loadDevMode();
-  await alarmThresholds.load();
   await UpdateChecker.init();
   runApp(const BssApp());
 }
@@ -1109,7 +1045,6 @@ class DashboardTab extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = ble.stationInfo;
     final p = ble.podSummary;
-    final alarms = evaluateAlarms(p);
 
     return RefreshIndicator(
       color: Palette.accent,
@@ -1122,28 +1057,6 @@ class DashboardTab extends StatelessWidget {
         padding: const EdgeInsets.all(12),
         child: Column(
         children: [
-          if (alarms.isNotEmpty)
-            Container(
-              margin: const EdgeInsets.only(bottom: 10),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Palette.danger.withOpacity(0.15),
-                border: Border.all(color: Palette.danger, width: 1.5),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(children: [
-                  Icon(Icons.warning_amber_rounded, color: Palette.danger, size: 18),
-                  const SizedBox(width: 6),
-                  Text('${alarms.length} ACTIVE ALARM${alarms.length > 1 ? "S" : ""}',
-                    style: TextStyle(color: Palette.danger, fontWeight: FontWeight.w900, fontSize: 12, letterSpacing: 1)),
-                ]),
-                const SizedBox(height: 6),
-                for (final a in alarms)
-                  Text('• $a',
-                    style: TextStyle(color: Palette.text, fontSize: 12, fontFamily: 'monospace')),
-              ]),
-            ),
           if (s != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
@@ -1696,41 +1609,6 @@ class SettingsTab extends StatelessWidget {
           ),
         ),
 
-        // Alarm thresholds
-        _Card(
-          title: const Text('ALARM THRESHOLDS'),
-          child: ValueListenableBuilder<AlarmThresholds>(
-            valueListenable: AlarmThresholds.notifier,
-            builder: (_, a, __) => Column(children: [
-              Row(children: [
-                Expanded(child: Text('Enable alarms',
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
-                Switch(
-                  value: a.enabled,
-                  activeColor: Palette.accent,
-                  onChanged: (v) {
-                    alarmThresholds.enabled = v;
-                    alarmThresholds.save();
-                  },
-                ),
-              ]),
-              const SizedBox(height: 6),
-              _thresholdRow(context, 'Over temp', '°C', a.overTempC, 40, 80, (v) {
-                alarmThresholds.overTempC = v;
-                alarmThresholds.save();
-              }),
-              _thresholdRow(context, 'Low SOC', '%', a.underSocPct, 5, 50, (v) {
-                alarmThresholds.underSocPct = v;
-                alarmThresholds.save();
-              }),
-              _thresholdRow(context, 'Cell delta', 'mV', a.cellDeltaMv, 50, 500, (v) {
-                alarmThresholds.cellDeltaMv = v;
-                alarmThresholds.save();
-              }),
-            ]),
-          ),
-        ),
-
         // Developer mode (gates Log tab visibility)
         _Card(
           title: const Text('DEVELOPER'),
@@ -1818,28 +1696,6 @@ class SettingsTab extends StatelessWidget {
       Text(label.toUpperCase(), style: TextStyle(fontSize: 10, color: Palette.textDim)),
     ]),
   );
-
-  Widget _thresholdRow(BuildContext context, String label, String unit, double value,
-      double min, double max, ValueChanged<double> onChanged) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(children: [
-        SizedBox(width: 90, child: Text(label,
-          style: TextStyle(fontSize: 12, color: Palette.textDim, fontWeight: FontWeight.w600))),
-        Expanded(child: Slider(
-          min: min,
-          max: max,
-          value: value.clamp(min, max),
-          activeColor: Palette.accent,
-          inactiveColor: Palette.border,
-          onChanged: onChanged,
-        )),
-        SizedBox(width: 70, child: Text('${value.toStringAsFixed(0)} $unit',
-          textAlign: TextAlign.right,
-          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, fontFamily: 'monospace'))),
-      ]),
-    );
-  }
 
   Widget _cmdButton(BuildContext ctx, String label, Color color, VoidCallback onTap) => SizedBox(
     width: double.infinity,
