@@ -77,14 +77,21 @@ jobs:
             echo "Skipping — no keystore secret"
             exit 0
           fi
-          # Write passwords to key.properties file (Gradle reads raw lines, no string escaping)
-          cat > key.properties <<EOF
-          storeFile=release.jks
-          storePassword=${STORE_PW}
-          keyAlias=${KEY_ALIAS}
-          keyPassword=${KEY_PW}
-          EOF
+          # Write each line individually to avoid heredoc indentation issues
+          # Use printf to avoid adding any trailing whitespace/newlines
+          {
+            printf 'storeFile=release.jks\n'
+            printf 'storePassword=%s\n' "$STORE_PW"
+            printf 'keyAlias=%s\n' "$KEY_ALIAS"
+            printf 'keyPassword=%s\n' "$KEY_PW"
+          } > key.properties
           echo "key.properties written ($(wc -c < key.properties) bytes)"
+          # Debug: show password lengths (not values) to detect truncation
+          echo "STORE_PW length: ${#STORE_PW}"
+          echo "KEY_PW length: ${#KEY_PW}"
+          echo "KEY_ALIAS: $KEY_ALIAS"
+          echo "key.properties content (values masked):"
+          sed 's/=.*/=***/' key.properties
 
       - name: Configure release signing in build.gradle.kts
         working-directory: ./mobile_app/android/app
