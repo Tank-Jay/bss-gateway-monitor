@@ -490,6 +490,14 @@ class BleService extends ChangeNotifier {
         }
       });
 
+      // Request larger MTU so big JSON payloads (Pod Summary, Pod Detail) aren't truncated
+      try {
+        final mtu = await device!.requestMtu(517);
+        log(LogType.info, 'MTU negotiated: $mtu bytes');
+      } catch (e) {
+        log(LogType.err, 'MTU request failed: $e');
+      }
+
       // Discover services
       log(LogType.info, 'Discovering services...');
       final services = await device!.discoverServices();
@@ -1148,7 +1156,7 @@ class PodDetailTab extends StatelessWidget {
                 _DataItem(label: 'Cycles', value: '${d['cycles'] ?? '--'}', unit: 'count', color: Palette.cycle),
                 _DataItem(label: 'Min Cell', value: (d['min_cv'] is num) ? ((d['min_cv'] as num) / 1000).toStringAsFixed(3) : '--', unit: 'V', color: Palette.volt),
                 _DataItem(label: 'Max Cell', value: (d['max_cv'] is num) ? ((d['max_cv'] as num) / 1000).toStringAsFixed(3) : '--', unit: 'V', color: Palette.volt),
-                _DataItem(label: 'Avail Cap', value: (d['avail_cap'] is num) ? ((d['avail_cap'] as num) / 1000).toStringAsFixed(3) : '--', unit: 'Ah', color: Palette.cap),
+                _DataItem(label: 'Avail Cap', value: (d['avail_cap'] is num) ? (d['avail_cap'] as num).toStringAsFixed(1) : '--', unit: 'Ah', color: Palette.cap),
                 _DataItem(label: 'Relay', value: '${d['relay'] ?? '--'}', unit: 'state', color: Palette.text),
               ],
             ),
