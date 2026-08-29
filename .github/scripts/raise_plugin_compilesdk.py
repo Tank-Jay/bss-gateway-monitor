@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Raise compileSdk for every generated Android plugin subproject.
+"""Raise compileSdk for the generated Android plugin subprojects that need it.
 
 Why this exists
 ---------------
@@ -16,6 +16,22 @@ cannot simply be committed. Hence a build-time patch.
 The alternative — bumping flutter_blue_plus 1.34 -> 2.3 — is a major version
 with breaking API changes across both apps in this repo, and validating it
 needs a full APK build.
+
+Why an allowlist and not every subproject
+-----------------------------------------
+Raising *all* plugins broke `package_info_plus` 5.0.1, whose Kotlin reads
+`PackageInfo.applicationInfo` and `PackageInfo.signatures` without null checks.
+Those fields gained `@Nullable` in API 34, so compiling that plugin against 35
+turns them into hard Kotlin errors:
+
+    Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable
+    receiver of type 'ApplicationInfo?'
+
+flutter_blue_plus's Android code is Java, which ignores those annotations, so
+raising only the module that actually fails the metadata check is safe.
+
+Every android subproject is logged at lifecycle level, raised or not, so a
+future metadata failure shows immediately which name to add to RAISE.
 
 Placement matters
 -----------------
@@ -42,30 +58,49 @@ import sys
 
 COMPILE_SDK = 35
 
+# Only modules that fail `checkReleaseAarMetadata`. See the docstring above for
+# why this is not "every subproject".
+RAISE = ["flutter_blue_plus"]
+
+_KTS_NAMES = ", ".join('"%s"' % n for n in RAISE)
+_GROOVY_NAMES = ", ".join("'%s'" % n for n in RAISE)
+
 KTS_BLOCK = """
 // Injected by .github/scripts/raise_plugin_compilesdk.py — see that file.
 // Must stay above Flutter's `subprojects { project.evaluationDependsOn(":app") }`,
 // which evaluates the projects and makes a later afterEvaluate illegal.
+val raiseCompileSdk = setOf(%s)
 subprojects {
     afterEvaluate {
         val androidExt = extensions.findByName("android")
         if (androidExt != null) {
-            androidExt.withGroovyBuilder { "compileSdkVersion"(%d) }
+            if (project.name in raiseCompileSdk) {
+                androidExt.withGroovyBuilder { "compileSdkVersion"(%d) }
+                logger.lifecycle("[compileSdk] raised ${project.name} -> android-%d")
+            } else {
+                logger.lifecycle("[compileSdk] left ${project.name} at its own value")
+            }
         }
     }
 }
-""" % COMPILE_SDK
+""" % (_KTS_NAMES, COMPILE_SDK, COMPILE_SDK)
 
 GROOVY_BLOCK = """
 // Injected by .github/scripts/raise_plugin_compilesdk.py — see that file.
+def raiseCompileSdk = [%s] as Set
 subprojects {
     afterEvaluate { p ->
         if (p.hasProperty('android')) {
-            p.android { compileSdkVersion %d }
+            if (raiseCompileSdk.contains(p.name)) {
+                p.android { compileSdkVersion %d }
+                p.logger.lifecycle("[compileSdk] raised ${p.name} -> android-%d")
+            } else {
+                p.logger.lifecycle("[compileSdk] left ${p.name} at its own value")
+            }
         }
     }
 }
-""" % COMPILE_SDK
+""" % (_GROOVY_NAMES, COMPILE_SDK, COMPILE_SDK)
 
 MARKER = "raise_plugin_compilesdk.py"
 
@@ -99,7 +134,7 @@ def main() -> int:
         where = f"inserted at offset {idx}, before the first subprojects block"
 
     path.write_text(src, encoding="utf-8")
-    print(f"Patched {path}: compileSdk {COMPILE_SDK} for all subprojects ({where})")
+    print(f"Patched {path}: compileSdk {COMPILE_SDK} for {RAISE} ({where})")
     return 0
 
 
