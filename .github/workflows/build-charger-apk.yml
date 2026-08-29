@@ -46,6 +46,10 @@ jobs:
             --org com.bss.charger \
             --platforms android \
             .
+          # flutter create drops a boilerplate widget test that pumps a `MyApp`
+          # this project does not have (its root widget is ChargerApp), so it
+          # fails to compile and takes the whole test step down with it.
+          rm -f test/widget_test.dart
 
       - name: Install dependencies
         working-directory: ./charger_app

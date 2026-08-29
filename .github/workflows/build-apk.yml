@@ -48,6 +48,10 @@ jobs:
             --org com.bss.monitor \
             --platforms android \
             .
+          # flutter create drops a boilerplate widget test that pumps a `MyApp`
+          # this project does not have (its root widget is BssApp), so it fails
+          # to compile and takes the whole test step down with it.
+          rm -f test/widget_test.dart
 
       - name: Install dependencies
         working-directory: ./mobile_app
