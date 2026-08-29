@@ -14,20 +14,28 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:fl_chart/fl_chart.dart';
+import 'faults.dart';
 
 // ══════════════════════════════════════════════════════════════
 //  BLE UUIDs — must match BLE_handler.h
 // ══════════════════════════════════════════════════════════════
+/// Firmware's pod-array cap (BLE_MAX_PODS in src/BLE_Handler/BLE_handler.h).
+/// This is the ceiling Pod Select accepts — NOT the number of pods that exist,
+/// which is a runtime value the gateway reports as total_pods.
+const int kBleMaxPods = 5;
+
 class BleUuids {
   static final svcInfo     = Guid('e1ec0001-1234-4321-abcd-0123456789ab');
   static final svcPod      = Guid('e1ec0002-1234-4321-abcd-0123456789ab');
   static final svcControl  = Guid('e1ec0003-1234-4321-abcd-0123456789ab');
+  static final svcDiag     = Guid('e1ec0004-1234-4321-abcd-0123456789ab');
   static final charStation = Guid('e1ec0101-1234-4321-abcd-0123456789ab');
   static final charSummary = Guid('e1ec0201-1234-4321-abcd-0123456789ab');
   static final charSelect  = Guid('e1ec0202-1234-4321-abcd-0123456789ab');
   static final charDetail  = Guid('e1ec0203-1234-4321-abcd-0123456789ab');
   static final charCommand = Guid('e1ec0301-1234-4321-abcd-0123456789ab');
   static final charResponse= Guid('e1ec0302-1234-4321-abcd-0123456789ab');
+  static final charFaults  = Guid('e1ec0401-1234-4321-abcd-0123456789ab');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -602,6 +610,10 @@ class UpdateChecker {
 class BleService extends ChangeNotifier {
   BluetoothDevice? device;
   BluetoothCharacteristic? charStation, charSummary, charSelect, charDetail, charCommand, charResponse;
+  // Diagnostics is a 4th service added in a later firmware. Kept separate from
+  // the six above because it must stay OPTIONAL — see the completeness check
+  // in connectToDevice(), which would otherwise refuse older gateways.
+  BluetoothCharacteristic? charFaults;
 
   ConnectionState state = ConnectionState.disconnected;
   String? deviceName;
@@ -612,6 +624,14 @@ class BleService extends ChangeNotifier {
   Map<String, dynamic>? podSummary;
   Map<String, dynamic>? podDetail;
   String lastCmdResponse = 'Waiting for command...';
+
+  /// Latest Diagnostics payload per station id. Upsert-only — see FaultsStore.
+  final FaultsStore faults = FaultsStore();
+
+  /// True once the gateway has been seen to expose the Diagnostics service.
+  /// Older firmware has no e1ec0004, and the UI says so rather than showing an
+  /// empty "all healthy" Diagnostics screen that would be a lie.
+  bool faultsSupported = false;
 
   // ── Trend history: per-pod rolling buffer of {t, v, i, soc} samples ──
   static const int _historyMax = 180;  // ~3 min at 1 Hz
@@ -641,7 +661,7 @@ class BleService extends ChangeNotifier {
   }
 
   final List<LogEntry> logs = [];
-  StreamSubscription<List<int>>? _summarySub, _responseSub;
+  StreamSubscription<List<int>>? _summarySub, _responseSub, _faultsSub;
   StreamSubscription<BluetoothConnectionState>? _connSub;
 
   void log(LogType t, String msg) {
@@ -750,6 +770,10 @@ class BleService extends ChangeNotifier {
             if (c.uuid == BleUuids.charCommand) charCommand = c;
             else if (c.uuid == BleUuids.charResponse) charResponse = c;
           }
+        } else if (s.uuid == BleUuids.svcDiag) {
+          for (final c in s.characteristics) {
+            if (c.uuid == BleUuids.charFaults) charFaults = c;
+          }
         }
       }
 
@@ -798,6 +822,47 @@ class BleService extends ChangeNotifier {
         } catch (e) { log(LogType.err, 'Response parse: $e'); }
       });
 
+      // Subscribe to Diagnostics/Faults notify (1 Hz, one frame per station).
+      // Optional on purpose: firmware without the e1ec0004 service still works,
+      // it just never populates the Diagnostics tab.
+      //
+      // onValueReceived, not lastValueStream: lastValueStream also replays
+      // read() results, and a READ of this characteristic returns only the
+      // local gateway. Combined with upsert semantics that would be harmless,
+      // but keeping notifications and reads distinct makes the log honest.
+      if (charFaults != null) {
+        faultsSupported = true;
+        try {
+          await charFaults!.setNotifyValue(true);
+          _faultsSub = charFaults!.onValueReceived.listen((val) {
+            if (val.isEmpty) return;
+            try {
+              final txt = utf8.decode(val);
+              final decoded = json.decode(txt);
+              if (decoded is! Map) return;
+              final sf = StationFaults.fromJson(
+                  decoded.cast<String, dynamic>(), DateTime.now());
+              // A frame we cannot key by sid is dropped rather than applied —
+              // a truncated payload must never wipe a good entry.
+              if (sf == null) {
+                log(LogType.err, 'FAULTS frame missing sid (${txt.length}B)');
+                return;
+              }
+              faults.upsert(sf);
+              readCount++;
+              log(LogType.rx, 'FAULTS ${sf.sid} (${txt.length}B)');
+              notifyListeners();
+            } catch (e) { log(LogType.err, 'Faults parse: $e'); }
+          });
+          log(LogType.info, 'Diagnostics service found — faults streaming');
+        } catch (e) {
+          log(LogType.err, 'Faults subscribe: $e');
+        }
+      } else {
+        faultsSupported = false;
+        log(LogType.info, 'No Diagnostics service — gateway firmware predates it');
+      }
+
       _setState(ConnectionState.connected);
       log(LogType.info, 'Connected successfully!');
 
@@ -824,10 +889,17 @@ class BleService extends ChangeNotifier {
   void _cleanup() {
     _summarySub?.cancel();
     _responseSub?.cancel();
+    _faultsSub?.cancel();
     _connSub?.cancel();
     device = null;
     charStation = charSummary = charSelect = charDetail = charCommand = charResponse = null;
+    charFaults = null;
     deviceName = null;
+    // Fault entries are cleared on disconnect rather than left on screen: the
+    // firmware force-disconnects every 10 minutes, and stale fault data shown
+    // as current is worse than showing nothing.
+    faults.clear();
+    faultsSupported = false;
   }
 
   Future<void> readStationInfo() async {
@@ -843,7 +915,68 @@ class BleService extends ChangeNotifier {
     } catch (e) { log(LogType.err, 'Station read: $e'); }
   }
 
+  /// Pod count reported by the gateway, or 0 before the first summary.
+  ///
+  /// Runtime value, not a build constant: firmware sets total_pods from a live
+  /// STM32 register clamped by BLE_MAX_PODS, so it can change between packets.
+  /// Never hard-code 5 (or 12) against it.
+  int get totalPods {
+    final t = (podSummary?['total_pods'] as num?)?.toInt();
+    if (t != null && t > 0) return t;
+    final list = podSummary?['pods'];
+    return list is List ? list.length : 0;
+  }
+
+  /// Slots the pod pager should offer.
+  ///
+  /// Driven by what the gateway reports, per spec §7 ("render whatever
+  /// total_pods you receive, don't hard-code 5"). Falls back to the firmware
+  /// array cap only before the first summary arrives, so the pager is never
+  /// empty on a fresh connection.
+  int get podPageCount => totalPods > 0 ? totalPods : kBleMaxPods;
+
+  /// Read the local station's fault payload on demand.
+  /// A read returns only the local gateway, so this is an upsert of that one
+  /// sid — never a replacement of the whole map.
+  Future<void> readFaults() async {
+    if (charFaults == null) return;
+    try {
+      log(LogType.tx, 'READ Faults');
+      final val = await charFaults!.read();
+
+      // onValueReceived fires for read responses too, so when the notify
+      // subscription is live the listener has already upserted this payload —
+      // parsing it again here would double-count readCount and double-log the
+      // same frame. Only decode inline when nothing else is listening.
+      if (_faultsSub != null) return;
+
+      final txt = utf8.decode(val);
+      final decoded = json.decode(txt);
+      if (decoded is! Map) return;
+      final sf = StationFaults.fromJson(
+          decoded.cast<String, dynamic>(), DateTime.now());
+      if (sf == null) return;
+      faults.upsert(sf);
+      readCount++;
+      log(LogType.rx, 'FAULTS ${sf.sid} (${txt.length}B)');
+      notifyListeners();
+    } catch (e) { log(LogType.err, 'Faults read: $e'); }
+  }
+
   Future<void> selectPod(int n) async {
+    // Match the firmware's own tolerance (1..BLE_MAX_PODS), NOT total_pods.
+    //
+    // PodSelectCallback accepts any slot up to BLE_MAX_PODS and answers a slot
+    // above the polled count with {"error":"pod not connected","total":N},
+    // which is exactly what the POD UNAVAILABLE card renders. Clamping to
+    // total_pods here instead would refuse the write, leave selectedPod
+    // pointing at the previous pod, and strand the page on a placeholder that
+    // no amount of tapping READ can resolve. The pager is bounded by
+    // podPageCount instead, so out-of-range slots are simply never offered.
+    if (n < 1 || n > kBleMaxPods) {
+      log(LogType.err, 'Pod $n outside firmware range (1-$kBleMaxPods)');
+      return;
+    }
     selectedPod = n;
     notifyListeners();
     if (charSelect == null) return;
@@ -864,7 +997,15 @@ class BleService extends ChangeNotifier {
       final txt = utf8.decode(val);
       podDetail = json.decode(txt) as Map<String, dynamic>;
       readCount++;
-      log(LogType.rx, 'DETAIL (${txt.length}B)');
+      // Firmware answers an unusable slot with {"error":...} instead of data.
+      // Rendered blindly that becomes a card full of '--', which reads as
+      // "connected but empty" rather than "this pod is not there".
+      final err = podDetail?['error'];
+      if (err != null) {
+        log(LogType.err, 'DETAIL pod $selectedPod: $err');
+      } else {
+        log(LogType.rx, 'DETAIL (${txt.length}B)');
+      }
       notifyListeners();
     } catch (e) { log(LogType.err, 'Pod Detail: $e'); }
   }
@@ -1002,6 +1143,32 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  /// Faults tab icon, badged with the active fault count so a problem is
+  /// visible from any tab without opening Diagnostics.
+  Widget _diagIcon(bool active) {
+    final n = _ble.faults.activeCount;
+    final icon = Icon(
+      active ? Icons.health_and_safety : Icons.health_and_safety_outlined,
+      size: 20,
+    );
+    if (n == 0) return icon;
+    final c = _ble.faults.anyCritical ? Palette.danger : Palette.warn;
+    return Stack(clipBehavior: Clip.none, children: [
+      icon,
+      Positioned(
+        right: -6, top: -3,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+          constraints: const BoxConstraints(minWidth: 14),
+          decoration: BoxDecoration(color: c, borderRadius: BorderRadius.circular(8)),
+          child: Text('$n',
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Colors.white)),
+        ),
+      ),
+    ]);
+  }
+
   void _showDevicePicker() {
     showModalBottomSheet(
       context: context,
@@ -1024,9 +1191,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _buildHome(bool devMode) {
     // Build tabs: Log is inserted only when Developer Mode is on.
+    // Diagnostics sits at index 2, immediately after Pods, so the Log tab
+    // stays the only conditionally-inserted entry.
     final pages = <Widget>[
-      DashboardTab(ble: _ble),
+      DashboardTab(ble: _ble, onOpenDiagnostics: () => setState(() => _tabIdx = 2)),
       PodDetailTab(ble: _ble),
+      DiagnosticsTab(ble: _ble),
       if (devMode) LogTab(ble: _ble),
       SettingsTab(ble: _ble),
     ];
@@ -1115,6 +1285,8 @@ class _HomeScreenState extends State<HomeScreen> {
         items: [
           const BottomNavigationBarItem(icon: Icon(Icons.dashboard_outlined, size: 20), activeIcon: Icon(Icons.dashboard, size: 20), label: 'Dashboard'),
           const BottomNavigationBarItem(icon: Icon(Icons.battery_charging_full_outlined, size: 20), activeIcon: Icon(Icons.battery_charging_full, size: 20), label: 'Pods'),
+          BottomNavigationBarItem(
+            icon: _diagIcon(false), activeIcon: _diagIcon(true), label: 'Faults'),
           if (devMode)
             const BottomNavigationBarItem(icon: Icon(Icons.list_alt_outlined, size: 20), activeIcon: Icon(Icons.list_alt, size: 20), label: 'Log'),
           const BottomNavigationBarItem(icon: Icon(Icons.person_outlined, size: 20), activeIcon: Icon(Icons.person, size: 20), label: 'Profile'),
@@ -1194,6 +1366,87 @@ Color _socColor(num s) => s >= 60 ? Palette.soc : s >= 30 ? Palette.warn : Palet
 Color _tempColor(num t) => t <= 45 ? Palette.soc : t <= 55 ? Palette.warn : Palette.danger;
 Color _cellColor(num mv) => (mv >= 3200 && mv <= 3650) ? Palette.soc : (mv >= 3000 && mv <= 3800) ? Palette.warn : Palette.danger;
 
+/// Fault severity → colour. sev is the firmware's 2/1/0 (CRITICAL/WARNING/INFO).
+Color _sevColor(int sev) => sev >= 2 ? Palette.danger : sev == 1 ? Palette.warn : Palette.volt;
+
+/// Fault severity → short label, used on chips and the diagnostics rows.
+String _sevLabel(int sev) => sev >= 2 ? 'CRITICAL' : sev == 1 ? 'WARNING' : 'INFO';
+
+IconData _sevIcon(int sev) => sev >= 2
+    ? Icons.error_outline
+    : sev == 1 ? Icons.warning_amber_rounded : Icons.info_outline;
+
+/// One decoded fault rendered as a compact chip.
+Widget _faultChip(FaultCode f) {
+  final c = _sevColor(f.sev);
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: c.withValues(alpha: 0.13),
+      border: Border.all(color: c.withValues(alpha: 0.55)),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Row(mainAxisSize: MainAxisSize.min, children: [
+      Icon(_sevIcon(f.sev), size: 12, color: c),
+      const SizedBox(width: 5),
+      Text(f.code,
+        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: c, fontFamily: 'monospace')),
+      const SizedBox(width: 5),
+      // Flexible so a long label at a large system text scale ellipsises
+      // instead of overflowing the chip — Wrap gives the Row unbounded width,
+      // so without this it renders a yellow-and-black overflow stripe.
+      Flexible(
+        child: Text(f.sentence,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(fontSize: 10.5, color: Palette.text, fontWeight: FontWeight.w600)),
+      ),
+    ]),
+  );
+}
+
+/// The headline fault banner (Screen A / Screen C).
+///
+/// Hidden only when code == "OK". Deliberately NOT hidden on sev == 0: STA-10
+/// (low memory) is a real INFO fault that also reports sev 0, so gating on
+/// severity would silently swallow it.
+Widget _mainErrorBanner(MainFault m, {VoidCallback? onTap}) {
+  final c = _sevColor(m.sev);
+  return Container(
+    width: double.infinity,
+    margin: const EdgeInsets.only(bottom: 10),
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+    decoration: BoxDecoration(
+      color: c.withValues(alpha: 0.15),
+      border: Border.all(color: c, width: 1.2),
+      borderRadius: BorderRadius.circular(10),
+    ),
+    child: InkWell(
+      onTap: onTap,
+      child: Row(children: [
+        Icon(_sevIcon(m.sev), color: c, size: 22),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Text(m.code,
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: c, fontFamily: 'monospace')),
+              const SizedBox(width: 6),
+              Text(_sevLabel(m.sev),
+                style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: c, letterSpacing: 1)),
+            ]),
+            const SizedBox(height: 2),
+            // msg is rendered verbatim — firmware already prefixes pod faults
+            // with "Slot N ", so composing our own prefix would double it.
+            Text(m.msg.isEmpty ? 'Fault reported' : m.msg,
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Palette.text)),
+          ]),
+        ),
+        if (onTap != null) Icon(Icons.chevron_right, color: c, size: 20),
+      ]),
+    ),
+  );
+}
+
 Widget _statusBadge(String? v) {
   if (v == 'yes') return Text('YES', style: TextStyle(color: Palette.success, fontWeight: FontWeight.w700, fontSize: 18));
   if (v == 'no') return Text('NO', style: TextStyle(color: Palette.danger, fontWeight: FontWeight.w700, fontSize: 18));
@@ -1205,18 +1458,25 @@ Widget _statusBadge(String? v) {
 // ══════════════════════════════════════════════════════════════
 class DashboardTab extends StatelessWidget {
   final BleService ble;
-  const DashboardTab({super.key, required this.ble});
+
+  /// Jumps to the Diagnostics tab when the banner is tapped. Supplied by
+  /// HomeScreen, which owns the tab index.
+  final VoidCallback? onOpenDiagnostics;
+
+  const DashboardTab({super.key, required this.ble, this.onOpenDiagnostics});
 
   @override
   Widget build(BuildContext context) {
     final s = ble.stationInfo;
     final p = ble.podSummary;
+    final station = ble.faults.primary;
 
     return RefreshIndicator(
       color: Palette.accent,
       backgroundColor: Palette.card,
       onRefresh: () async {
         await ble.readStationInfo();
+        await ble.readFaults();
       },
       child: SingleChildScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
@@ -1232,6 +1492,9 @@ class DashboardTab extends StatelessWidget {
                 textAlign: TextAlign.center,
               ),
             ),
+          // MAIN ERROR banner — the one fault to act on first.
+          if (station != null && !station.main.isOk)
+            _mainErrorBanner(station.main, onTap: onOpenDiagnostics),
           _Card(
             title: const Text('STATION INFO'),
             action: _refreshBtn(() => ble.readStationInfo()),
@@ -1275,7 +1538,7 @@ class DashboardTab extends StatelessWidget {
                   padding: const EdgeInsets.only(bottom: 8),
                   child: Text('Total Pods: ${p['total_pods'] ?? 0}', style: TextStyle(fontSize: 11, color: Palette.textDim, fontFamily: 'monospace')),
                 ),
-                if (p['pods'] is List) ...(p['pods'] as List).map((pod) => _podSummaryCard(pod as Map<String, dynamic>)).toList(),
+                if (p['pods'] is List) ...(p['pods'] as List).map((pod) => _podSummaryCard(pod as Map<String, dynamic>, station)).toList(),
               ],
             ),
           ),
@@ -1309,24 +1572,60 @@ class DashboardTab extends StatelessWidget {
     );
   }
 
-  Widget _podSummaryCard(Map<String, dynamic> pod) {
+  Widget _podSummaryCard(Map<String, dynamic> pod, StationFaults? station) {
     final soc = (pod['soc'] as num?) ?? 0;
-    return Container(
+    final podNum = (pod['pod'] as num?)?.toInt() ?? 0;
+
+    // Faults are keyed by their own `p` field, never by list position: the
+    // summary array and the faults array are clamped by different firmware
+    // constants (BLE_MAX_PODS=5 vs NUMBER_OF_SLAVE=2) so their lengths can
+    // legitimately differ. A missing entry means UNKNOWN, not healthy.
+    final pf = station?.podFor(podNum);
+    final offline = pf != null && !pf.online;
+    final sev = pf?.worstSev;
+
+    return Opacity(
+      // Greyed rather than hidden — an offline pod is information, not absence.
+      opacity: offline ? 0.55 : 1.0,
+      child: Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: Palette.dataBg,
-        border: Border.all(color: Palette.border),
+        border: Border.all(
+          color: sev != null ? _sevColor(sev).withValues(alpha: 0.7) : Palette.border,
+          width: sev != null ? 1.4 : 1,
+        ),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Column(children: [
         Row(children: [
           Text('POD ${pod['pod']}',
             style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: Palette.accent, letterSpacing: 1)),
+          if (sev != null) ...[
+            const SizedBox(width: 7),
+            Container(
+              width: 9, height: 9,
+              decoration: BoxDecoration(color: _sevColor(sev), shape: BoxShape.circle),
+            ),
+          ],
+          if (offline) ...[
+            const SizedBox(width: 7),
+            Text('OFFLINE',
+              style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: Palette.danger, letterSpacing: 1)),
+          ],
           const Spacer(),
           Text('Relay: ${pod['relay'] ?? '--'}',
             style: TextStyle(fontSize: 10, color: Palette.textDim, fontFamily: 'monospace')),
         ]),
+        if (pf != null && pf.hasFault) ...[
+          const SizedBox(height: 7),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Wrap(spacing: 5, runSpacing: 5,
+              children: pf.decoded.map(_faultChip).toList()),
+          ),
+        ],
         const SizedBox(height: 8),
         Row(children: [
           _statCol('Voltage', '${(pod['v'] as num?)?.toStringAsFixed(2) ?? '--'}V', Palette.volt),
@@ -1340,6 +1639,7 @@ class DashboardTab extends StatelessWidget {
           const Expanded(child: SizedBox()),
         ]),
       ]),
+      ),
     );
   }
 
@@ -1361,6 +1661,170 @@ class DashboardTab extends StatelessWidget {
   Widget _noData({String hint = 'Connect and read'}) => Padding(
     padding: const EdgeInsets.all(20),
     child: Text(hint, style: TextStyle(color: Palette.textDim, fontSize: 11, letterSpacing: 1), textAlign: TextAlign.center),
+  );
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Diagnostics Tab  (Screen C) — full fault list
+// ══════════════════════════════════════════════════════════════
+class DiagnosticsTab extends StatelessWidget {
+  final BleService ble;
+  const DiagnosticsTab({super.key, required this.ble});
+
+  @override
+  Widget build(BuildContext context) {
+    final stations = ble.faults.stations;
+
+    return RefreshIndicator(
+      color: Palette.accent,
+      backgroundColor: Palette.card,
+      onRefresh: () async => ble.readFaults(),
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(12),
+        child: Column(children: [
+          if (ble.state != ConnectionState.connected)
+            _Card(
+              title: const Text('DIAGNOSTICS'),
+              child: _noDataBox('Connect to a gateway to see faults'),
+            )
+          else if (!ble.faultsSupported)
+            _Card(
+              title: const Text('DIAGNOSTICS'),
+              child: _noDataBox(
+                'This gateway has no Diagnostics service.\n'
+                'Fault detail needs firmware with e1ec0004.'),
+            )
+          else if (stations.isEmpty)
+            _Card(
+              title: const Text('DIAGNOSTICS'),
+              child: _noDataBox('Waiting for the first fault report...'),
+            )
+          else
+            ...stations.map((s) => _stationCard(context, s)),
+        ]),
+      ),
+    );
+  }
+
+  Widget _stationCard(BuildContext context, StationFaults s) {
+    final active = s.allActive;
+    final stale = s.isStale(DateTime.now());
+
+    return _Card(
+      title: Row(children: [
+        Text(s.sid.toUpperCase()),
+        if (!stale) ...const [SizedBox(width: 8), _LiveDot()],
+      ]),
+      action: stale
+          ? Text('STALE',
+              style: TextStyle(fontSize: 10, color: Palette.warn, fontWeight: FontWeight.w900))
+          : null,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        // main is pinned at the top — it is the fault to act on first.
+        if (!s.main.isOk) _mainErrorBanner(s.main),
+
+        if (active.isEmpty)
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 18),
+            alignment: Alignment.center,
+            child: Column(children: [
+              Icon(Icons.verified_outlined, color: Palette.success, size: 30),
+              const SizedBox(height: 8),
+              Text('All systems OK',
+                style: TextStyle(color: Palette.success, fontWeight: FontWeight.w700, fontSize: 13, letterSpacing: 1)),
+            ]),
+          )
+        else ...[
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Text('${active.length} ACTIVE FAULT${active.length == 1 ? '' : 'S'}',
+              style: TextStyle(fontSize: 10, color: Palette.textDim, fontWeight: FontWeight.w700, letterSpacing: 1)),
+          ),
+          ...active.map(_faultRow),
+        ],
+
+        const SizedBox(height: 10),
+        _podOnlineStrip(s),
+
+        // The station word is shown raw as well: bits 10..31 have no name in
+        // firmware, so a future bit still shows up here even if it decodes to
+        // the generic "Fault" label.
+        Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Row(children: [
+            Text('STA WORD',
+              style: TextStyle(fontSize: 9, color: Palette.textDim, fontWeight: FontWeight.w700, letterSpacing: 1)),
+            const SizedBox(width: 8),
+            Text('0x${s.sta.toRadixString(16).toUpperCase().padLeft(8, '0')}',
+              style: TextStyle(fontSize: 11, color: Palette.text, fontFamily: 'monospace', fontWeight: FontWeight.w700)),
+          ]),
+        ),
+      ]),
+    );
+  }
+
+  Widget _faultRow(FaultCode f) {
+    final c = _sevColor(f.sev);
+    return Container(
+      margin: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: Palette.dataBg,
+        border: Border(left: BorderSide(color: c, width: 3)),
+        borderRadius: const BorderRadius.only(
+          topRight: Radius.circular(6), bottomRight: Radius.circular(6)),
+      ),
+      child: Row(children: [
+        Icon(_sevIcon(f.sev), size: 15, color: c),
+        const SizedBox(width: 9),
+        Text(f.code,
+          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: c, fontFamily: 'monospace')),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Text(f.isStation ? f.sentence : f.withSlot,
+            style: TextStyle(fontSize: 12, color: Palette.text, fontWeight: FontWeight.w600)),
+        ),
+        Text(_sevLabel(f.sev),
+          style: TextStyle(fontSize: 8.5, color: c, fontWeight: FontWeight.w900, letterSpacing: 0.5)),
+      ]),
+    );
+  }
+
+  /// Per-pod online strip. Shows every pod the station reported, so a slot with
+  /// no fault entry is visibly absent rather than silently assumed healthy.
+  Widget _podOnlineStrip(StationFaults s) {
+    if (s.pods.isEmpty) {
+      return Text('No pod entries reported',
+        style: TextStyle(fontSize: 10, color: Palette.textDim));
+    }
+    return Wrap(spacing: 6, runSpacing: 6, children: s.pods.map((p) {
+      final c = !p.online
+          ? Palette.danger
+          : (p.hasFault ? _sevColor(p.worstSev ?? 1) : Palette.success);
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+        decoration: BoxDecoration(
+          color: c.withValues(alpha: 0.12),
+          border: Border.all(color: c.withValues(alpha: 0.5)),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Text('POD ${p.p}',
+            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: c, fontFamily: 'monospace')),
+          const SizedBox(width: 6),
+          Text(p.online ? (p.hasFault ? 'FAULT' : 'OK') : 'OFFLINE',
+            style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: Palette.textDim)),
+        ]),
+      );
+    }).toList());
+  }
+
+  Widget _noDataBox(String hint) => Padding(
+    padding: const EdgeInsets.all(20),
+    child: Text(hint,
+      style: TextStyle(color: Palette.textDim, fontSize: 11, letterSpacing: 1, height: 1.5),
+      textAlign: TextAlign.center),
   );
 }
 
@@ -1436,7 +1900,9 @@ class _PodDetailTabState extends State<PodDetailTab> {
 
     return PageView.builder(
       controller: _pageCtrl,
-      itemCount: 5,
+      // Driven by the gateway's reported pod count, so a 2-pod station offers
+      // two pages instead of three dead ones.
+      itemCount: widget.ble.podPageCount,
       onPageChanged: _onPageChanged,
       itemBuilder: (_, idx) => _buildPodPage(context, idx + 1, d),
     );
@@ -1455,7 +1921,7 @@ class _PodDetailTabState extends State<PodDetailTab> {
         padding: const EdgeInsets.all(12),
         child: Column(children: [
         _Card(
-          title: Text('POD $podNum OF 5'),
+          title: Text('POD $podNum OF ${ble.podPageCount}'),
           action: GestureDetector(
             onTap: () => ble.readPodDetail(),
             child: Container(
@@ -1495,8 +1961,40 @@ class _PodDetailTabState extends State<PodDetailTab> {
 
   List<Widget> _buildPodBody(int podNum, Map<String, dynamic> d) {
     final samples = widget.ble.historyFor(podNum);
+
+    // Firmware answers an unusable slot with {"error":...}. Without this the
+    // card renders a full body of '--' and reads as "connected but idle".
+    final err = d['error'];
+    if (err != null) {
+      final total = (d['total'] as num?)?.toInt();
+      return [
+        _Card(
+          title: const Text('POD UNAVAILABLE'),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(children: [
+              Icon(Icons.report_gmailerrorred_outlined, color: Palette.warn, size: 30),
+              const SizedBox(height: 10),
+              Text(
+                // The firmware's own text embeds a literal "(1-5)" that goes
+                // stale the moment BLE_MAX_PODS changes, so phrase it from the
+                // numbers the gateway actually reports.
+                total != null
+                    ? 'Pod $podNum is not connected.\nThis station reports $total pod${total == 1 ? '' : 's'}.'
+                    : 'Pod $podNum is not available.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Palette.textDim, fontSize: 12, height: 1.5),
+              ),
+            ]),
+          ),
+        ),
+        ..._podFaultCards(podNum),
+      ];
+    }
+
     return [
       _socBar(d),
+      ..._podFaultCards(podNum),
       _Card(
         title: const Text('TELEMETRY'),
         child: GridView.count(
@@ -1519,6 +2017,57 @@ class _PodDetailTabState extends State<PodDetailTab> {
       if (d['pdu_temps'] is List) _tempsCard('PDU TEMPERATURES', d['pdu_temps'] as List, 'PDU'),
       _Card(child: _DataItem(label: 'Pod NTC Temp', value: (d['pod_temp'] as num?)?.toStringAsFixed(1) ?? '--', unit: 'C', color: Palette.temp)),
       if (samples.length >= 2) _trendsCard(samples),
+    ];
+  }
+
+  /// Decoded fault chips for this slot (Screen B, §6).
+  ///
+  /// Three distinct states, deliberately not collapsed into two: this pod has
+  /// faults / this pod is clean / this pod was not in the fault report at all.
+  /// The last is not the same as healthy — the summary and fault arrays are
+  /// clamped by different firmware constants and can disagree in length.
+  List<Widget> _podFaultCards(int podNum) {
+    final station = widget.ble.faults.primary;
+    if (station == null) return const [];
+    final pf = station.podFor(podNum);
+
+    if (pf == null) {
+      return [
+        _Card(
+          title: const Text('SLOT FAULTS'),
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Text('No fault data reported for pod $podNum.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Palette.textDim, fontSize: 11, height: 1.5)),
+          ),
+        ),
+      ];
+    }
+
+    return [
+      _Card(
+        title: const Text('SLOT FAULTS'),
+        action: Text(pf.online ? 'ONLINE' : 'OFFLINE',
+          style: TextStyle(
+            fontSize: 10, fontWeight: FontWeight.w900, letterSpacing: 1,
+            color: pf.online ? Palette.success : Palette.danger)),
+        child: !pf.hasFault
+            ? Padding(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  Icon(Icons.check_circle_outline, color: Palette.success, size: 18),
+                  const SizedBox(width: 8),
+                  Text('No faults reported',
+                    style: TextStyle(color: Palette.success, fontSize: 12, fontWeight: FontWeight.w700)),
+                ]),
+              )
+            : Align(
+                alignment: Alignment.centerLeft,
+                child: Wrap(spacing: 6, runSpacing: 6,
+                  children: pf.decoded.map(_faultChip).toList()),
+              ),
+      ),
     ];
   }
 

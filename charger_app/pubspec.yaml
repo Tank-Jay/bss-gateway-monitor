@@ -1,11 +1,11 @@
-name: bss_gateway_monitor
-description: BSS IoT Gateway BLE Monitor — ESP32-S3
+name: bss_charger_monitor
+description: BSS Charger Monitor — BLE fleet view for 2-bay ESP32-S3 battery chargers
 publish_to: 'none'
-version: 1.1.0+17
+version: 1.0.0+1
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
-  flutter: ">=3.16.0"
+  flutter: ">=3.22.0"
 
 dependencies:
   flutter:
@@ -14,12 +14,10 @@ dependencies:
   permission_handler: ^11.3.0
   shared_preferences: ^2.2.2
   cupertino_icons: ^1.0.6
-  http: ^1.2.0
-  url_launcher: ^6.2.5
-  package_info_plus: ^5.0.1
+  fl_chart: ^0.66.2
   share_plus: ^7.2.2
   path_provider: ^2.1.2
-  fl_chart: ^0.66.2
+  package_info_plus: ^5.0.1
 
 dev_dependencies:
   flutter_test:

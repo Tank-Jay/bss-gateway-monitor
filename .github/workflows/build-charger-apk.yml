@@ -1,14 +1,12 @@
-name: Build BSS Mobile App APK
+name: Build BSS Charger Monitor APK
 
 on:
-  # Trigger on push to main branch
   push:
     branches: [main, master]
     paths:
-      - 'mobile_app/**'
-      - '.github/workflows/build-apk.yml'
+      - 'charger_app/**'
+      - '.github/workflows/build-charger-apk.yml'
 
-  # Allow manual trigger from GitHub UI (Actions tab → Run workflow)
   workflow_dispatch:
 
 permissions:
@@ -35,44 +33,44 @@ jobs:
           cache: true
 
       - name: Flutter doctor
-        working-directory: ./mobile_app
+        working-directory: ./charger_app
         run: flutter doctor -v
 
       - name: Generate Android scaffolding
-        working-directory: ./mobile_app
-        # flutter create fills in android/, ios/, gradle files, MainActivity etc.
-        # without overwriting pubspec.yaml, lib/, or our customized AndroidManifest.xml
+        working-directory: ./charger_app
+        # Fills in android/, gradle wrappers and MainActivity without touching
+        # pubspec.yaml, lib/ or our customized AndroidManifest.xml.
         run: |
           flutter create \
-            --project-name bss_gateway_monitor \
-            --org com.bss.monitor \
+            --project-name bss_charger_monitor \
+            --org com.bss.charger \
             --platforms android \
             .
 
       - name: Install dependencies
-        working-directory: ./mobile_app
+        working-directory: ./charger_app
         run: flutter pub get
 
+      - name: Analyze
+        working-directory: ./charger_app
+        run: flutter analyze
+
       - name: Unit tests
-        working-directory: ./mobile_app
-        # Pins the fault decode tables (lib/faults.dart) to the firmware in
-        # src/Mqtt_Handler/Mqtt_handler.cpp. A wrong bit here shows an operator
-        # the wrong fault, so it is worth failing the build over.
-        # NOTE: deliberately no `flutter analyze` step — main.dart carries 14
-        # pre-existing warnings that predate this workflow and would block every
-        # build. Clean those up first, then add analyze.
+        working-directory: ./charger_app
+        # Guards the advertisement byte layout against drifting away from
+        # ChargerBLE_BuildAdvPayload() in the firmware.
         run: flutter test
 
       - name: Generate launcher icons
-        working-directory: ./mobile_app
+        working-directory: ./charger_app
         run: dart run flutter_launcher_icons
 
       - name: Generate native splash screen
-        working-directory: ./mobile_app
+        working-directory: ./charger_app
         run: dart run flutter_native_splash:create
 
       - name: Decode release keystore
-        working-directory: ./mobile_app/android/app
+        working-directory: ./charger_app/android/app
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
@@ -83,8 +81,8 @@ jobs:
             echo "No keystore secret — using debug signing (apps will not upgrade in-place)"
           fi
 
-      - name: Write key.properties (password file)
-        working-directory: ./mobile_app/android
+      - name: Write key.properties
+        working-directory: ./charger_app/android
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           STORE_PW: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -95,8 +93,6 @@ jobs:
             echo "Skipping — no keystore secret"
             exit 0
           fi
-          # Write each line individually to avoid heredoc indentation issues
-          # Use printf to avoid adding any trailing whitespace/newlines
           {
             printf 'storeFile=release.jks\n'
             printf 'storePassword=%s\n' "$STORE_PW"
@@ -104,15 +100,10 @@ jobs:
             printf 'keyPassword=%s\n' "$KEY_PW"
           } > key.properties
           echo "key.properties written ($(wc -c < key.properties) bytes)"
-          # Debug: show password lengths (not values) to detect truncation
-          echo "STORE_PW length: ${#STORE_PW}"
-          echo "KEY_PW length: ${#KEY_PW}"
-          echo "KEY_ALIAS: $KEY_ALIAS"
-          echo "key.properties content (values masked):"
           sed 's/=.*/=***/' key.properties
 
-      - name: Configure release signing in build.gradle.kts
-        working-directory: ./mobile_app/android/app
+      - name: Configure release signing
+        working-directory: ./charger_app/android/app
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
@@ -120,7 +111,6 @@ jobs:
             echo "Skipping signing config patch"
             exit 0
           fi
-          ls -la
           python3 <<'PY'
           import pathlib, re, sys
           kts = pathlib.Path("build.gradle.kts")
@@ -128,7 +118,6 @@ jobs:
 
           if kts.exists():
               src = kts.read_text()
-              # Top-of-file: load key.properties
               loader = '''import java.util.Properties
           import java.io.FileInputStream
 
@@ -139,7 +128,6 @@ jobs:
           }
 
           '''
-              # signingConfigs block referencing properties
               block = '''
               signingConfigs {
                   create("release") {
@@ -150,21 +138,17 @@ jobs:
                   }
               }
           '''
-              # Insert loader at top of file (before plugins block or any other content)
               new_src = loader + src
-              # Inject signingConfigs just before buildTypes
               new_src2 = re.sub(r"(\n\s*buildTypes\s*\{)", block + r"\1", new_src, count=1)
-              # Repoint release buildType
               new_src3 = new_src2.replace(
                   'signingConfig = signingConfigs.getByName("debug")',
                   'signingConfig = signingConfigs.getByName("release")'
               )
               if new_src3 == new_src:
                   print("WARNING: no signing substitution occurred", file=sys.stderr)
-                  print(new_src)
                   sys.exit(1)
               kts.write_text(new_src3)
-              print("Patched build.gradle.kts (Kotlin DSL, reads key.properties)")
+              print("Patched build.gradle.kts")
           elif groovy.exists():
               src = groovy.read_text()
               loader = '''def keystoreProperties = new Properties()
@@ -192,53 +176,52 @@ jobs:
               )
               if new_src3 == new_src:
                   print("WARNING: no signing substitution occurred", file=sys.stderr)
-                  print(new_src)
                   sys.exit(1)
               groovy.write_text(new_src3)
-              print("Patched build.gradle (Groovy, reads key.properties)")
+              print("Patched build.gradle")
           else:
               print("ERROR: no gradle file", file=sys.stderr); sys.exit(1)
           PY
-          echo "---AFTER PATCH (first 50 lines)---"
-          [ -f build.gradle.kts ] && head -50 build.gradle.kts || head -50 build.gradle
 
       - name: Build release APK
-        working-directory: ./mobile_app
+        working-directory: ./charger_app
         run: flutter build apk --release
 
       - name: Rename APK with build info
-        working-directory: ./mobile_app
+        working-directory: ./charger_app
         run: |
           mkdir -p dist
           cp build/app/outputs/flutter-apk/app-release.apk \
-             dist/bss-gateway-monitor-${{ github.run_number }}.apk
+             dist/bss-charger-monitor-${{ github.run_number }}.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bss-gateway-monitor-apk
-          path: mobile_app/dist/*.apk
+          name: bss-charger-monitor-apk
+          path: charger_app/dist/*.apk
           retention-days: 30
 
       - name: Read app version from pubspec
         id: pubspec
-        working-directory: ./mobile_app
+        working-directory: ./charger_app
         run: |
           VER=$(grep '^version:' pubspec.yaml | awk '{print $2}' | cut -d'+' -f1)
           echo "version=$VER" >> $GITHUB_OUTPUT
-          echo "tag=v${VER}" >> $GITHUB_OUTPUT
+          echo "tag=charger-v${VER}" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.pubspec.outputs.tag }}-build${{ github.run_number }}
-          name: BSS Gateway Monitor ${{ steps.pubspec.outputs.tag }} (build ${{ github.run_number }})
+          name: BSS Charger Monitor ${{ steps.pubspec.outputs.version }} (build ${{ github.run_number }})
           body: |
             Automated build from commit ${{ github.sha }}.
 
             **Install:** download the APK below, then open it on Android to install.
-          files: mobile_app/dist/*.apk
+
+            Fleet view reads charger advertisements directly — no pairing needed.
+          files: charger_app/dist/*.apk
           draft: false
           prerelease: false
         env:
@@ -246,8 +229,7 @@ jobs:
 
       - name: Summary
         run: |
-          echo "## APK Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "## Charger APK Build Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** ${{ steps.pubspec.outputs.tag }} (build ${{ github.run_number }})" >> $GITHUB_STEP_SUMMARY
-          echo "**Download:** see the Releases page or this run's Artifacts section." >> $GITHUB_STEP_SUMMARY
-          echo "**File:** \`bss-gateway-monitor-${{ github.run_number }}.apk\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.pubspec.outputs.version }} (build ${{ github.run_number }})" >> $GITHUB_STEP_SUMMARY
+          echo "**File:** \`bss-charger-monitor-${{ github.run_number }}.apk\`" >> $GITHUB_STEP_SUMMARY
