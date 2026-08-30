@@ -15,6 +15,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'faults.dart';
+import 'mesh.dart';
 
 // ══════════════════════════════════════════════════════════════
 //  BLE UUIDs — must match BLE_handler.h
@@ -664,6 +665,30 @@ class BleService extends ChangeNotifier {
   StreamSubscription<List<int>>? _summarySub, _responseSub, _faultsSub;
   StreamSubscription<BluetoothConnectionState>? _connSub;
 
+  // ── Auto-reconnect (BLE_App_Integration.md §1) ──
+  //
+  // The gateway no longer times the session out and re-advertises the moment a
+  // client drops — "10-minute idle timeout REMOVED" in BLE_handler.cpp. So a
+  // lost link is almost always transient: the phone went out of range, or the
+  // radio glitched. The doc's step 6 is simply "just reconnect", and doing it
+  // automatically saves the operator re-picking the station from a scan list
+  // every time they walk behind the cabinet.
+
+  /// Set when the *user* asked to disconnect, so the retry below does not
+  /// immediately undo it.
+  bool _userDisconnect = false;
+
+  /// Non-zero while a retry cycle is in progress. Doubles as the flag that
+  /// tells a failed [connectToDevice] whether it was a retry (schedule the
+  /// next one) or the user's first manual attempt (report and stop).
+  int _reconnectAttempt = 0;
+  Timer? _reconnectTimer;
+
+  static const int _reconnectMaxAttempts = 5;
+
+  /// True between a dropped link and the next retry firing.
+  bool get autoReconnecting => _reconnectTimer != null;
+
   void log(LogType t, String msg) {
     logs.add(LogEntry(DateTime.now(), t, msg));
     if (logs.length > 200) logs.removeAt(0);
@@ -723,6 +748,9 @@ class BleService extends ChangeNotifier {
 
   /// Connect to a user-selected device.
   Future<void> connectToDevice(BluetoothDevice target) async {
+    // Any connect attempt — manual or retried — clears the "user wanted out"
+    // latch, so a later drop is treated as a fault rather than as intent.
+    _userDisconnect = false;
     try {
       await stopScanning();
       device = target;
@@ -737,8 +765,11 @@ class BleService extends ChangeNotifier {
       _connSub = device!.connectionState.listen((s) {
         if (s == BluetoothConnectionState.disconnected) {
           log(LogType.info, 'Device disconnected');
+          // Captured before _cleanup(), which nulls `device`.
+          final dropped = device;
           _setState(ConnectionState.disconnected);
           _cleanup();
+          if (!_userDisconnect && dropped != null) _scheduleReconnect(dropped);
         }
       });
 
@@ -865,6 +896,9 @@ class BleService extends ChangeNotifier {
 
       _setState(ConnectionState.connected);
       log(LogType.info, 'Connected successfully!');
+      // A good link ends the retry cycle, so the next drop gets a full budget
+      // of attempts rather than inheriting a nearly-exhausted counter.
+      _reconnectAttempt = 0;
 
       // Remember this device so it shows up as quick-connect next time
       KnownDevicesStore.remember(
@@ -878,10 +912,51 @@ class BleService extends ChangeNotifier {
     } catch (e) {
       log(LogType.err, 'Connect failed: $e');
       _setState(ConnectionState.disconnected);
+      // Only keep retrying if we were already in a retry cycle. A failed
+      // *manual* connect stops here — the user is standing there and can see
+      // the error, and silently looping would hide a wrong device pick.
+      if (_reconnectAttempt > 0 && !_userDisconnect) _scheduleReconnect(target);
     }
   }
 
+  /// Queue the next auto-reconnect attempt, with a widening delay.
+  void _scheduleReconnect(BluetoothDevice target) {
+    if (_reconnectAttempt >= _reconnectMaxAttempts) {
+      log(LogType.err,
+          'Auto-reconnect gave up after $_reconnectAttempt attempts — tap CONNECT to retry');
+      _reconnectAttempt = 0;
+      notifyListeners();
+      return;
+    }
+    _reconnectAttempt++;
+
+    // 2, 4, 6, 8, 10 s. Not instant on purpose: the gateway restarts
+    // advertising on a timer of its own after a disconnect (the adv-restart
+    // block in BLE_handler.cpp), so an immediate retry can beat it to the air
+    // and fail for no reason.
+    final delay = Duration(seconds: 2 * _reconnectAttempt);
+    log(LogType.info,
+        'Auto-reconnect in ${delay.inSeconds}s (attempt $_reconnectAttempt/$_reconnectMaxAttempts)');
+
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(delay, () {
+      _reconnectTimer = null;
+      if (_userDisconnect) return;
+      connectToDevice(target);
+    });
+    notifyListeners();
+  }
+
+  /// Stop any retry cycle. Called for every deliberate disconnect.
+  void _cancelReconnect() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectAttempt = 0;
+  }
+
   Future<void> disconnect() async {
+    _userDisconnect = true;
+    _cancelReconnect();
     try { await device?.disconnect(); } catch (_) {}
     _cleanup();
   }
@@ -895,9 +970,12 @@ class BleService extends ChangeNotifier {
     charStation = charSummary = charSelect = charDetail = charCommand = charResponse = null;
     charFaults = null;
     deviceName = null;
-    // Fault entries are cleared on disconnect rather than left on screen: the
-    // firmware force-disconnects every 10 minutes, and stale fault data shown
-    // as current is worse than showing nothing.
+    // Fault entries are cleared on disconnect rather than left on screen —
+    // stale fault data shown as current is worse than showing nothing. (The
+    // original reason, a 10-minute forced session timeout, is gone: the
+    // firmware now holds the link open indefinitely. Clearing still stands,
+    // because a drop now means out-of-range or a fault, and neither is a
+    // reason to trust the last frame.)
     faults.clear();
     faultsSupported = false;
   }
@@ -1126,6 +1204,9 @@ class _HomeScreenState extends State<HomeScreen> {
   void _refresh() => setState(() {});
 
   Color _connColor() {
+    // A pending auto-reconnect is amber, not red: the link is coming back on
+    // its own and a red "CONNECT" chip would invite a tap that cancels it.
+    if (_ble.autoReconnecting) return Palette.warn;
     switch (_ble.state) {
       case ConnectionState.connected: return Palette.success;
       case ConnectionState.connecting:
@@ -1135,6 +1216,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   String _connLabel() {
+    if (_ble.autoReconnecting) return 'RECONNECTING...';
     switch (_ble.state) {
       case ConnectionState.connected: return 'DISCONNECT';
       case ConnectionState.connecting: return 'CONNECTING...';
@@ -1226,7 +1308,13 @@ class _HomeScreenState extends State<HomeScreen> {
             GestureDetector(
               onTap: () {
                 if (_ble.state == ConnectionState.connected) { _ble.disconnect(); }
-                else if (_ble.state == ConnectionState.disconnected) { _showDevicePicker(); }
+                else if (_ble.state == ConnectionState.disconnected) {
+                  // Taking manual control cancels the pending retry first —
+                  // otherwise its timer fires part-way through the picker's
+                  // scan and the two fight over the radio.
+                  if (_ble.autoReconnecting) _ble.disconnect();
+                  _showDevicePicker();
+                }
               },
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
@@ -2461,6 +2549,47 @@ class SettingsTab extends StatelessWidget {
           ),
         ),
 
+        // BLE Mesh — Method 2 (doc/BLE_App_Integration.md §0, §8).
+        // Lives here rather than in the tab bar on purpose: the two BLE
+        // methods are mutually exclusive per firmware build, so a station is
+        // never reachable both ways at once and a permanent tab would be dead
+        // weight on every Method-1 deployment.
+        _Card(
+          title: const Text('BLE MESH (METHOD 2)'),
+          child: Column(children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Text(
+                'For gateways flashed with CURRENT_BLE_METHOD = BLE_METHOD_MESH. '
+                'Scans for stations running as mesh nodes and shows which are '
+                'provisioned.',
+                style: TextStyle(fontSize: 11, color: Palette.textDim, height: 1.4),
+              ),
+            ),
+            SizedBox(
+              width: double.infinity,
+              height: 44,
+              child: OutlinedButton.icon(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const MeshScreen()),
+                ),
+                icon: Icon(Icons.hub_outlined, size: 18, color: Palette.accent),
+                label: Text('OPEN MESH MONITOR',
+                  style: TextStyle(
+                    color: Palette.accent,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 12,
+                    letterSpacing: 0.8)),
+                style: OutlinedButton.styleFrom(
+                  side: BorderSide(color: Palette.accent),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+            ),
+          ]),
+        ),
+
         // Control commands
         _Card(
           title: const Text('REMOTE CONTROL'),
@@ -3138,4 +3267,503 @@ class _DevicePickerSheetState extends State<DevicePickerSheet> {
       ),
     );
   }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  BLE Mesh — Method 2  (doc/BLE_App_Integration.md §0, §8)
+// ══════════════════════════════════════════════════════════════
+
+/// Scans for gateways running as ESP-BLE-MESH nodes and keeps a [MeshStore]
+/// of what it hears.
+///
+/// A separate service from [BleService] rather than a mode inside it, because
+/// the two BLE methods share no state at all: Method 2 has no GATT connection,
+/// no characteristics, no station id — only advertisements. The one thing they
+/// do share is the radio, so [start] stops any scan already running.
+class MeshService extends ChangeNotifier {
+  final MeshStore store = MeshStore();
+
+  bool scanning = false;
+  String? error;
+
+  /// Re-read on a timer so staleness ages on screen without waiting for a new
+  /// advertisement to trigger a rebuild.
+  DateTime now = DateTime.now();
+
+  StreamSubscription<List<ScanResult>>? _scanSub;
+  Timer? _tick;
+  bool _disposed = false;
+
+  /// Guards every notify. A scan callback or the 1 Hz tick can land after the
+  /// screen is popped, and ChangeNotifier throws when used post-dispose.
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<bool> _permissions() async {
+    if (await Permission.bluetoothScan.request().isGranted &&
+        await Permission.bluetoothConnect.request().isGranted) {
+      await Permission.locationWhenInUse.request();
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> start() async {
+    error = null;
+
+    if (!await _permissions()) {
+      error = 'Bluetooth permission denied — grant Nearby devices in Settings';
+      _notify();
+      return;
+    }
+    if (await FlutterBluePlus.isSupported == false) {
+      error = 'Bluetooth not supported on this device';
+      _notify();
+      return;
+    }
+    if (await FlutterBluePlus.adapterState.first != BluetoothAdapterState.on) {
+      error = 'Bluetooth is OFF — turn it on and try again';
+      _notify();
+      return;
+    }
+
+    // The device picker may have left a scan running; one radio, one scan.
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+
+    await _scanSub?.cancel();
+    _scanSub = FlutterBluePlus.scanResults.listen(_onResults);
+
+    try {
+      // No service filter. Mesh beacons do carry 0x1827/0x1828, but which AD
+      // field holds them varies by stack, and an OS-level filter that misses
+      // one reads exactly like an empty deployment. Filtering happens in
+      // MeshBeacon.fromServiceData instead, where a miss is debuggable.
+      //
+      // continuousUpdates keeps rssi and lastSeen flowing; without it Android
+      // reports each node once per scan, so every node would age into "stale"
+      // while sitting on the bench working perfectly.
+      await FlutterBluePlus.startScan(
+        continuousUpdates: true,
+        continuousDivisor: 2,
+        androidScanMode: AndroidScanMode.lowLatency,
+      );
+      scanning = true;
+    } catch (e) {
+      error = 'Scan failed: $e';
+      scanning = false;
+    }
+
+    _tick ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      now = DateTime.now();
+      _notify();
+    });
+    _notify();
+  }
+
+  Future<void> stop() async {
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+    await _scanSub?.cancel();
+    _scanSub = null;
+    _tick?.cancel();
+    _tick = null;
+    scanning = false;
+    _notify();
+  }
+
+  void _onResults(List<ScanResult> results) {
+    final at = DateTime.now();
+    var changed = false;
+
+    for (final r in results) {
+      final raw = r.advertisementData.serviceData;
+      if (raw.isEmpty) continue;
+
+      final data = <String, List<int>>{
+        for (final e in raw.entries) e.key.toString(): e.value,
+      };
+      final beacon = MeshBeacon.fromServiceData(data);
+      if (beacon == null) continue;
+
+      store.observe(
+        id: r.device.remoteId.str,
+        beacon: beacon,
+        rssi: r.rssi,
+        at: at,
+      );
+      changed = true;
+    }
+
+    if (changed) {
+      now = at;
+      _notify();
+    }
+  }
+
+  /// Feed a decrypted vendor-model status in.
+  ///
+  /// Nothing calls this yet — see [_meshStatusNote] for why. It is the single
+  /// seam a transport plugs into, so adding one touches neither the store, the
+  /// sorting, nor any widget.
+  void ingestStatus(String nodeId, MeshStatus status) {
+    store.applyStatus(nodeId, status);
+    _notify();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _tick?.cancel();
+    _scanSub?.cancel();
+    try {
+      FlutterBluePlus.stopScan();
+    } catch (_) {}
+    super.dispose();
+  }
+}
+
+/// Method-2 monitor: which stations are on the air as mesh nodes, and which of
+/// them have been provisioned.
+class MeshScreen extends StatefulWidget {
+  const MeshScreen({super.key});
+
+  @override
+  State<MeshScreen> createState() => _MeshScreenState();
+}
+
+class _MeshScreenState extends State<MeshScreen> {
+  final _mesh = MeshService();
+
+  @override
+  void initState() {
+    super.initState();
+    _mesh.addListener(_refresh);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _mesh.start());
+  }
+
+  @override
+  void dispose() {
+    _mesh.removeListener(_refresh);
+    _mesh.dispose();
+    super.dispose();
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final nodes = _mesh.store.sorted();
+
+    return Scaffold(
+      backgroundColor: Palette.bg,
+      appBar: AppBar(
+        backgroundColor: Palette.card,
+        elevation: 0,
+        iconTheme: IconThemeData(color: Palette.accent),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('BLE MESH',
+                style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                    color: Palette.accent,
+                    letterSpacing: 1)),
+            Text(_mesh.scanning ? 'Scanning…' : 'Scan stopped',
+                style: TextStyle(fontSize: 11, color: Palette.textDim)),
+          ],
+        ),
+        actions: [
+          IconButton(
+            tooltip: _mesh.scanning ? 'Stop scan' : 'Start scan',
+            icon: Icon(
+                _mesh.scanning
+                    ? Icons.stop_circle_outlined
+                    : Icons.play_circle_outline,
+                color: _mesh.scanning ? Palette.danger : Palette.success),
+            onPressed: () => _mesh.scanning ? _mesh.stop() : _mesh.start(),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(12),
+        children: [
+          if (_mesh.error != null) _meshError(_mesh.error!),
+          _meshSummary(_mesh.store),
+          if (nodes.isEmpty) _meshEmptyHelp(_mesh.scanning),
+          for (final n in nodes) _meshNodeCard(n, _mesh.now),
+          // Keyed on statusCount, NOT faultedCount: a depot where every node
+          // reported in healthy also has zero faults, and telling that
+          // operator their reports are unreadable would be a plain lie.
+          if (nodes.isNotEmpty && _mesh.store.statusCount == 0)
+            _meshStatusNote(),
+        ],
+      ),
+    );
+  }
+}
+
+Widget _meshError(String msg) => Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Palette.danger.withValues(alpha: 0.12),
+        border: Border.all(color: Palette.danger),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(children: [
+        Icon(Icons.error_outline, color: Palette.danger, size: 20),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(msg,
+              style: TextStyle(
+                  fontSize: 12,
+                  color: Palette.danger,
+                  fontWeight: FontWeight.w700)),
+        ),
+      ]),
+    );
+
+Widget _meshSummary(MeshStore store) {
+  Widget stat(String label, String value, Color c) => Expanded(
+        child: Column(children: [
+          Text(value,
+              style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w900,
+                  color: c,
+                  fontFamily: 'monospace')),
+          const SizedBox(height: 2),
+          Text(label,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                  fontSize: 9,
+                  color: Palette.textDim,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.5)),
+        ]),
+      );
+
+  return _Card(
+    title: const Text('MESH NETWORK'),
+    child: Row(children: [
+      stat('NODES', '${store.length}', Palette.accent),
+      stat('PROVISIONED', '${store.provisionedCount}',
+          store.provisionedCount > 0 ? Palette.success : Palette.textDim),
+      stat('UNPROVISIONED', '${store.unprovisionedCount}',
+          store.unprovisionedCount > 0 ? Palette.warn : Palette.textDim),
+      stat('FAULTS', '${store.faultedCount}',
+          store.faultedCount > 0 ? Palette.danger : Palette.success),
+    ]),
+  );
+}
+
+Widget _meshEmptyHelp(bool scanning) => _Card(
+      title: const Text('NO MESH NODES IN RANGE'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            scanning
+                ? 'Listening for Mesh Provisioning (0x1827) and Mesh Proxy '
+                    '(0x1828) advertisements. Nothing yet.'
+                : 'Scan is stopped. Tap play in the top bar to listen.',
+            style: TextStyle(fontSize: 12, color: Palette.text, height: 1.5),
+          ),
+          const SizedBox(height: 12),
+          Text('A station appears here only when its firmware was built with',
+              style:
+                  TextStyle(fontSize: 11, color: Palette.textDim, height: 1.5)),
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Palette.dataBg,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text('CURRENT_BLE_METHOD   BLE_METHOD_MESH',
+                style: TextStyle(
+                    fontSize: 11,
+                    color: Palette.accent,
+                    fontFamily: 'monospace')),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'in src/Feature_Config.h, and flashed from the PlatformIO / ESP-IDF '
+            'build. The default Arduino build is Method 1, which connects from '
+            'the Dashboard instead.',
+            style: TextStyle(fontSize: 11, color: Palette.textDim, height: 1.5),
+          ),
+        ],
+      ),
+    );
+
+/// Shown once nodes are visible but none is reporting.
+///
+/// Seeing a node and reading its fault report are two different problems: the
+/// beacons are public, the reports are encrypted. Without this card an empty
+/// fault column looks like a clean bill of health for the whole depot, which
+/// is the most expensive way this screen could be misread.
+Widget _meshStatusNote() => _Card(
+      title: const Text('FAULT REPORTS'),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Icon(Icons.lock_outline, size: 16, color: Palette.warn),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text('Nodes visible — reports not readable',
+                  style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      color: Palette.warn)),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          Text(
+            "Each node publishes a fault report every 2 s, but mesh traffic is "
+            "encrypted with the network's NetKey and AppKey. Provision the "
+            "stations with nRF Mesh first. Reading the reports in this app also "
+            "needs those keys and a mesh crypto client — not built yet.",
+            style: TextStyle(fontSize: 11, color: Palette.textDim, height: 1.5),
+          ),
+        ],
+      ),
+    );
+
+Widget _meshNodeCard(MeshNode n, DateTime now) {
+  final st = n.status;
+  final beaconStale = n.beaconStaleAt(now);
+  final statusStale = n.statusStaleAt(now);
+
+  // No status is deliberately NOT green. An undecodable node is unknown, and
+  // colouring unknown as healthy is the same lie _meshStatusNote() guards.
+  final Color accent = st == null
+      ? (n.isProvisioned ? Palette.textDim : Palette.warn)
+      : _sevColor(st.severity);
+
+  // Parenthesised deliberately: an unbracketed cascade would bind to the whole
+  // conditional and try to sort the const [] in the null branch, which throws.
+  final List<FaultCode> faults =
+      st == null ? const <FaultCode>[] : (st.stationFaults..sort(compareFaults));
+
+  return Opacity(
+    opacity: beaconStale ? 0.55 : 1,
+    child: _Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            Container(
+              width: 10,
+              height: 10,
+              decoration: BoxDecoration(color: accent, shape: BoxShape.circle),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(n.label,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.5)),
+            ),
+            _meshStateChip(n),
+          ]),
+          const SizedBox(height: 8),
+          Row(children: [
+            Icon(Icons.wifi_tethering, size: 13, color: Palette.textDim),
+            const SizedBox(width: 4),
+            Text('${n.rssi} dBm',
+                style: TextStyle(
+                    fontSize: 11,
+                    color: Palette.textDim,
+                    fontFamily: 'monospace')),
+            const SizedBox(width: 12),
+            Icon(Icons.schedule,
+                size: 13, color: beaconStale ? Palette.warn : Palette.textDim),
+            const SizedBox(width: 4),
+            Text('${now.difference(n.seenAt).inSeconds}s ago',
+                style: TextStyle(
+                    fontSize: 11,
+                    color: beaconStale ? Palette.warn : Palette.textDim,
+                    fontFamily: 'monospace')),
+          ]),
+          if (n.deviceUuid != null && n.deviceUuid!.isBssStation) ...[
+            const SizedBox(height: 4),
+            Text(n.deviceUuid!.mac,
+                style: TextStyle(
+                    fontSize: 10,
+                    color: Palette.textDim,
+                    fontFamily: 'monospace')),
+          ],
+          if (st != null) ...[
+            const SizedBox(height: 10),
+            if (!st.isOk) _mainErrorBanner(st.main),
+            if (st.isOk)
+              Row(children: [
+                Icon(Icons.check_circle, size: 15, color: Palette.success),
+                const SizedBox(width: 6),
+                Text('No faults reported',
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: Palette.success,
+                        fontWeight: FontWeight.w700)),
+              ]),
+            if (faults.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [for (final f in faults) _faultChip(f)],
+              ),
+            ],
+            if (statusStale) ...[
+              const SizedBox(height: 8),
+              Text(
+                  'Report is stale — no publish for '
+                  '${now.difference(st.at).inSeconds}s',
+                  style: TextStyle(
+                      fontSize: 10,
+                      color: Palette.warn,
+                      fontWeight: FontWeight.w700)),
+            ],
+          ],
+        ],
+      ),
+    ),
+  );
+}
+
+Widget _meshStateChip(MeshNode n) {
+  final (String label, Color c) = switch (n.kind) {
+    MeshBeaconKind.unprovisioned => ('UNPROVISIONED', Palette.warn),
+    MeshBeaconKind.proxyNetworkId ||
+    MeshBeaconKind.proxyNodeIdentity =>
+      ('PROVISIONED', Palette.success),
+    MeshBeaconKind.unknown => ('MESH NODE', Palette.textDim),
+  };
+
+  return Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+    decoration: BoxDecoration(
+      color: c.withValues(alpha: 0.15),
+      border: Border.all(color: c),
+      borderRadius: BorderRadius.circular(20),
+    ),
+    child: Text(label,
+        style: TextStyle(
+            fontSize: 9,
+            color: c,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.5)),
+  );
 }
