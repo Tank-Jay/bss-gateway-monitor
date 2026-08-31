@@ -274,57 +274,6 @@ List<int>? stripStatusOpcode(List<int> access) {
   return access.sublist(kMeshStatusOpcode.length);
 }
 
-// ══════════════════════════════════════════════════════════════
-//  Word codes — Fault_StaCode() / Fault_PodCode()
-// ══════════════════════════════════════════════════════════════
-
-/// Station word codes, bit 0..9. Verbatim from Fault_StaCode() in
-/// src/Mqtt_Handler/Mqtt_handler.cpp, in FaultIdTypeDef order.
-///
-/// These are what `mainFault` actually contains. Note this is a different
-/// namespace from the `STA-05` labels the app renders elsewhere: the firmware
-/// never sends those, faults.dart composes them from the bit index.
-const List<String> kStaCode = [
-  'SD_FAULT', // bit 0 — FAULT_SD_MOUNT
-  'TIME_UNSYNCED', // bit 1 — FAULT_NTP_SYNC
-  'CLOUD_DOWN', // bit 2 — FAULT_MQTT_CONNECT
-  'WIFI_DOWN', // bit 3 — FAULT_WIFI
-  'RS485_DEAD', // bit 4 — FAULT_RS485
-  'REBOOT_ABNORMAL', // bit 5 — FAULT_REBOOT
-  'BROWNOUT', // bit 6 — FAULT_BROWNOUT
-  'AUDIO_FAULT', // bit 7 — FAULT_AUDIO
-  'QUEUE_FULL', // bit 8 — FAULT_SD_QUEUE_FULL
-  'LOW_HEAP', // bit 9 — FAULT_LOW_HEAP
-];
-
-/// Per-pod word codes, bit 0..7. Verbatim from Fault_PodCode().
-const List<String> kPodCode = [
-  'POD_OFFLINE', // bit 0
-  'LOCK_FAIL', // bit 1
-  'LOCK_STUCK', // bit 2
-  'NO_ECHO', // bit 3
-  'CELL_OV', // bit 4
-  'CELL_UV', // bit 5
-  'OVER_TEMP', // bit 6
-  'BMS_ERROR', // bit 7
-];
-
-/// Fault_StaCode()'s fallback for bits 10..31, which have no enum member.
-/// It is not reversible to a bit — every unnamed station bit produces it.
-const String kStaCodeUnknown = 'STA_FAULT';
-
-/// Station bit for a word code, or null if it is not a station code.
-int? staBitForCode(String code) {
-  final i = kStaCode.indexOf(code);
-  return i < 0 ? null : i;
-}
-
-/// Pod bit for a word code, or null if it is not a pod code.
-int? podBitForCode(String code) {
-  final i = kPodCode.indexOf(code);
-  return i < 0 ? null : i;
-}
-
 /// Rebuild the operator text the firmware would have put in `main.msg`.
 ///
 /// The mesh payload drops `msg` to stay small over the air (§8.3), so the app

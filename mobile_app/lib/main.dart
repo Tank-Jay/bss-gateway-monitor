@@ -15,6 +15,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'faults.dart';
+import 'fixes.dart';
 import 'mesh.dart';
 
 // ══════════════════════════════════════════════════════════════
@@ -23,7 +24,12 @@ import 'mesh.dart';
 /// Firmware's pod-array cap (BLE_MAX_PODS in src/BLE_Handler/BLE_handler.h).
 /// This is the ceiling Pod Select accepts — NOT the number of pods that exist,
 /// which is a runtime value the gateway reports as total_pods.
-const int kBleMaxPods = 5;
+///
+/// Six, per the header. Spec 3.3 says to write "1"..."5", but BLE_handler.cpp
+/// validates `podNum < 1 || podNum > BLE_MAX_PODS` and BLE_MAX_PODS is 6, so
+/// the doc is one short and a 6-pod station would have had an unreachable
+/// slot. Following the header.
+const int kBleMaxPods = 6;
 
 class BleUuids {
   static final svcInfo     = Guid('e1ec0001-1234-4321-abcd-0123456789ab');
@@ -847,6 +853,10 @@ class BleService extends ChangeNotifier {
               _handleParamsResponse(decoded);
               return;
             }
+            if (decoded is Map<String, dynamic>) {
+              final fx = FixResult.fromResponse(decoded);
+              if (fx != null) _handleFixResult(fx);
+            }
           } catch (_) {}
 
           notifyListeners();
@@ -978,6 +988,12 @@ class BleService extends ChangeNotifier {
     // reason to trust the last frame.)
     faults.clear();
     faultsSupported = false;
+    // Cooldowns are per-session: a fix sent to the station we just
+    // left says nothing about the next one we connect to.
+    fixCooldowns.clear();
+    lastFixResult = null;
+    _cooldownTick?.cancel();
+    _cooldownTick = null;
   }
 
   Future<void> readStationInfo() async {
@@ -1094,6 +1110,69 @@ class BleService extends ChangeNotifier {
       await charCommand!.write(utf8.encode(cmd), withoutResponse: false);
       log(LogType.tx, 'CMD: $cmd');
     } catch (e) { log(LogType.err, 'CMD: $e'); }
+  }
+
+  // ── Fault-fix ops (spec §3.5) ──
+
+  /// Which Fix buttons are damped right now.
+  final FixCooldowns fixCooldowns = FixCooldowns();
+
+  /// The gateway's answer to the most recent fix, for the snackbar.
+  FixResult? lastFixResult;
+
+  /// Drives the countdown on the buttons. Runs only while something is
+  /// cooling — a permanent 1 Hz rebuild of the Diagnostics list would be a
+  /// silly thing to leave running on a connected phone.
+  Timer? _cooldownTick;
+
+  Future<void> sendFix(FixAction a) async {
+    if (charCommand == null) return;
+    final at = DateTime.now();
+    // Second line of defence. The button is already disabled while cooling,
+    // but a queued tap or a programmatic caller must not slip past §3.5's
+    // "do not re-enable until the fault clears or ~5 s pass".
+    if (fixCooldowns.isCooling(a.key, at)) return;
+
+    fixCooldowns.mark(a.key, at);
+    _startCooldownTick();
+    log(LogType.tx, 'FIX ${a.label}: ${a.payload}');
+    notifyListeners();
+
+    await sendCommand(a.payload);
+  }
+
+  void _startCooldownTick() {
+    _cooldownTick ??= Timer.periodic(const Duration(seconds: 1), (t) {
+      notifyListeners();
+      if (!_anyCooling) {
+        t.cancel();
+        _cooldownTick = null;
+      }
+    });
+  }
+
+  /// Note this walks only *active* faults: once a bit clears, its button is
+  /// gone from the UI, so the tick stops on its own. That is §3.5's other exit
+  /// condition ("until the fault clears") falling out for free.
+  bool get _anyCooling {
+    final now = DateTime.now();
+    for (final c in faults.allActive) {
+      for (final a in fixesFor(c, totalPods: totalPods)) {
+        if (fixCooldowns.isCooling(a.key, now)) return true;
+      }
+    }
+    return false;
+  }
+
+  void _handleFixResult(FixResult fx) {
+    lastFixResult = fx;
+    log(fx.ok ? LogType.rx : LogType.err,
+        'FIX ${fx.op}${fx.code.isEmpty ? '' : ' ${fx.code}'}: ${fx.message}');
+    // A rejected op changed nothing on the gateway, so holding the button for
+    // the full 5 s would only delay the operator seeing the error and trying
+    // something else. Accepted ops keep their cooldown.
+    if (!fx.ok) fixCooldowns.release(fx.key);
+    notifyListeners();
   }
 
   // ── Parameter editing (get_params, set_param, save_reboot) ──
@@ -1829,7 +1908,7 @@ class DiagnosticsTab extends StatelessWidget {
             child: Text('${active.length} ACTIVE FAULT${active.length == 1 ? '' : 'S'}',
               style: TextStyle(fontSize: 10, color: Palette.textDim, fontWeight: FontWeight.w700, letterSpacing: 1)),
           ),
-          ...active.map(_faultRow),
+          ...active.map((f) => _faultRow(context, f)),
         ],
 
         const SizedBox(height: 10),
@@ -1852,7 +1931,7 @@ class DiagnosticsTab extends StatelessWidget {
     );
   }
 
-  Widget _faultRow(FaultCode f) {
+  Widget _faultRow(BuildContext context, FaultCode f) {
     final c = _sevColor(f.sev);
     return Container(
       margin: const EdgeInsets.only(bottom: 6),
@@ -1863,18 +1942,21 @@ class DiagnosticsTab extends StatelessWidget {
         borderRadius: const BorderRadius.only(
           topRight: Radius.circular(6), bottomRight: Radius.circular(6)),
       ),
-      child: Row(children: [
-        Icon(_sevIcon(f.sev), size: 15, color: c),
-        const SizedBox(width: 9),
-        Text(f.code,
-          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: c, fontFamily: 'monospace')),
-        const SizedBox(width: 9),
-        Expanded(
-          child: Text(f.isStation ? f.sentence : f.withSlot,
-            style: TextStyle(fontSize: 12, color: Palette.text, fontWeight: FontWeight.w600)),
-        ),
-        Text(_sevLabel(f.sev),
-          style: TextStyle(fontSize: 8.5, color: c, fontWeight: FontWeight.w900, letterSpacing: 0.5)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Icon(_sevIcon(f.sev), size: 15, color: c),
+          const SizedBox(width: 9),
+          Text(f.code,
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: c, fontFamily: 'monospace')),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(f.isStation ? f.sentence : f.withSlot,
+              style: TextStyle(fontSize: 12, color: Palette.text, fontWeight: FontWeight.w600)),
+          ),
+          Text(_sevLabel(f.sev),
+            style: TextStyle(fontSize: 8.5, color: c, fontWeight: FontWeight.w900, letterSpacing: 0.5)),
+        ]),
+        _fixButtons(context, ble, f),
       ]),
     );
   }
@@ -2150,10 +2232,17 @@ class _PodDetailTabState extends State<PodDetailTab> {
                     style: TextStyle(color: Palette.success, fontSize: 12, fontWeight: FontWeight.w700)),
                 ]),
               )
-            : Align(
-                alignment: Alignment.centerLeft,
-                child: Wrap(spacing: 6, runSpacing: 6,
-                  children: pf.decoded.map(_faultChip).toList()),
+            : Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Wrap(spacing: 6, runSpacing: 6,
+                    children: pf.decoded.map(_faultChip).toList()),
+                  // One button per fixable fault. LOCK_FAIL and LOCK_STUCK
+                  // both resolve to the same unlock pulse and share a
+                  // cooldown key, so pressing either damps both.
+                  for (final f in pf.decoded)
+                    _fixButtons(context, widget.ble, f),
+                ],
               ),
       ),
     ];
@@ -3766,4 +3855,120 @@ Widget _meshStateChip(MeshNode n) {
             fontWeight: FontWeight.w800,
             letterSpacing: 0.5)),
   );
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Fault-fix buttons — spec §3.5
+// ══════════════════════════════════════════════════════════════
+
+/// Remedy buttons for one fault, or nothing at all when the firmware offers
+/// none.
+///
+/// Deliberately silent in the no-remedy case: RS485_DEAD, POD_OFFLINE and
+/// CELL_OV need a person at the cabinet, and a greyed-out "Fix" would imply
+/// the app could do something about them from here.
+Widget _fixButtons(BuildContext context, BleService ble, FaultCode f) {
+  final actions = fixesFor(f, totalPods: ble.totalPods);
+  if (actions.isEmpty) return const SizedBox.shrink();
+
+  final now = DateTime.now();
+  return Padding(
+    padding: const EdgeInsets.only(top: 8),
+    child: Wrap(
+      spacing: 8,
+      runSpacing: 6,
+      children: [for (final a in actions) _fixButton(context, ble, a, now)],
+    ),
+  );
+}
+
+Color _fixColor(FixKind k) {
+  switch (k) {
+    case FixKind.reboot:
+      return Palette.danger;
+    case FixKind.podUnlock:
+      return Palette.warn;
+    case FixKind.stationFix:
+    case FixKind.ack:
+      return Palette.accent;
+  }
+}
+
+Widget _fixButton(
+    BuildContext context, BleService ble, FixAction a, DateTime now) {
+  final left = ble.fixCooldowns.remaining(a.key, now);
+  final cooling = left > 0;
+  final c = _fixColor(a.kind);
+
+  return SizedBox(
+    height: 30,
+    child: OutlinedButton(
+      // Disabled rather than hidden while cooling: a button that vanishes for
+      // five seconds moves everything under it and the operator loses their
+      // place in the list.
+      onPressed: cooling ? null : () => _runFix(context, ble, a),
+      style: OutlinedButton.styleFrom(
+        side: BorderSide(color: cooling ? Palette.border : c),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        visualDensity: VisualDensity.compact,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+      ),
+      child: Text(
+        cooling ? '${a.label}  ${left}s' : a.label,
+        style: TextStyle(
+          fontSize: 10,
+          fontWeight: FontWeight.w900,
+          letterSpacing: 0.5,
+          color: cooling ? Palette.textDim : c,
+        ),
+      ),
+    ),
+  );
+}
+
+Future<void> _runFix(BuildContext context, BleService ble, FixAction a) async {
+  if (a.needsConfirm) {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Palette.card,
+        title: Text(a.label,
+            style: TextStyle(
+                color: _fixColor(a.kind),
+                fontWeight: FontWeight.w900,
+                fontSize: 16,
+                letterSpacing: 1)),
+        content: Text(a.description,
+            style: TextStyle(color: Palette.text, fontSize: 13, height: 1.5)),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('CANCEL', style: TextStyle(color: Palette.textDim)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(a.label,
+                style: TextStyle(
+                    color: _fixColor(a.kind), fontWeight: FontWeight.w900)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+  }
+
+  await ble.sendFix(a);
+  if (!context.mounted) return;
+
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    backgroundColor: Palette.card,
+    duration: const Duration(seconds: 4),
+    content: Text(
+      // No success claim here. The write only reaches the gateway's command
+      // handler; whether the fault actually clears shows up in the next
+      // Faults notify, which is the thing worth watching.
+      '${a.label} sent — watch the fault clear',
+      style: TextStyle(color: Palette.text, fontSize: 12),
+    ),
+  ));
 }

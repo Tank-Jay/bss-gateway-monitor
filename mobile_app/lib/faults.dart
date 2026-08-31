@@ -149,6 +149,19 @@ class FaultCode {
   /// active" carries no information about the hardware.
   bool get notInstrumented => !isStation && kPodBitsNotInstrumented.contains(bit);
 
+  /// The firmware's own word code for this bit — `RS485_DEAD`, `LOCK_FAIL`.
+  ///
+  /// A different identifier from [code]: `STA-05` is the label this app
+  /// composes for display, while this is what the gateway actually puts on the
+  /// wire. The fault-fix ops in §3.5 are keyed by THIS one, so a Fix button
+  /// that sent [code] instead would get `"status":"error"` every time.
+  String get wordCode {
+    if (isStation) {
+      return bit >= 0 && bit < kStaCode.length ? kStaCode[bit] : kStaCodeUnknown;
+    }
+    return bit >= 0 && bit < kPodCode.length ? kPodCode[bit] : kStaCodeUnknown;
+  }
+
   /// Text with a capital first letter, for standalone display. Derived from
   /// [text] rather than stored, so the two can never drift apart.
   String get sentence =>
@@ -405,4 +418,61 @@ class FaultsStore {
   int get activeCount => allActive.length;
 
   bool get anyCritical => allActive.any((c) => c.sev >= 2);
+}
+
+// ══════════════════════════════════════════════════════════════
+//  Word codes — Fault_StaCode() / Fault_PodCode()
+//
+//  A SECOND namespace for the same bits. The "STA-05"/"POD-02" labels
+//  above are composed by this app; these word codes are what the firmware
+//  itself puts on the wire, in FaultMainTypeDef.code, in the mesh payload,
+//  and in the fault-fix ops of spec 3.5 — which is why they live here
+//  beside the text tables rather than in any one feature's file.
+// ══════════════════════════════════════════════════════════════
+
+/// Station word codes, bit 0..9. Verbatim from Fault_StaCode() in
+/// src/Mqtt_Handler/Mqtt_handler.cpp, in FaultIdTypeDef order.
+///
+/// These are what `mainFault` actually contains. Note this is a different
+/// namespace from the `STA-05` labels the app renders elsewhere: the firmware
+/// never sends those, faults.dart composes them from the bit index.
+const List<String> kStaCode = [
+  'SD_FAULT', // bit 0 — FAULT_SD_MOUNT
+  'TIME_UNSYNCED', // bit 1 — FAULT_NTP_SYNC
+  'CLOUD_DOWN', // bit 2 — FAULT_MQTT_CONNECT
+  'WIFI_DOWN', // bit 3 — FAULT_WIFI
+  'RS485_DEAD', // bit 4 — FAULT_RS485
+  'REBOOT_ABNORMAL', // bit 5 — FAULT_REBOOT
+  'BROWNOUT', // bit 6 — FAULT_BROWNOUT
+  'AUDIO_FAULT', // bit 7 — FAULT_AUDIO
+  'QUEUE_FULL', // bit 8 — FAULT_SD_QUEUE_FULL
+  'LOW_HEAP', // bit 9 — FAULT_LOW_HEAP
+];
+
+/// Per-pod word codes, bit 0..7. Verbatim from Fault_PodCode().
+const List<String> kPodCode = [
+  'POD_OFFLINE', // bit 0
+  'LOCK_FAIL', // bit 1
+  'LOCK_STUCK', // bit 2
+  'NO_ECHO', // bit 3
+  'CELL_OV', // bit 4
+  'CELL_UV', // bit 5
+  'OVER_TEMP', // bit 6
+  'BMS_ERROR', // bit 7
+];
+
+/// Fault_StaCode()'s fallback for bits 10..31, which have no enum member.
+/// It is not reversible to a bit — every unnamed station bit produces it.
+const String kStaCodeUnknown = 'STA_FAULT';
+
+/// Station bit for a word code, or null if it is not a station code.
+int? staBitForCode(String code) {
+  final i = kStaCode.indexOf(code);
+  return i < 0 ? null : i;
+}
+
+/// Pod bit for a word code, or null if it is not a pod code.
+int? podBitForCode(String code) {
+  final i = kPodCode.indexOf(code);
+  return i < 0 ? null : i;
 }
