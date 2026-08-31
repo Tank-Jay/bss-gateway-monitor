@@ -846,10 +846,13 @@ class BleService extends ChangeNotifier {
           log(LogType.rx, 'RESPONSE: $txt');
           lastCmdResponse = txt;
 
-          // Route op:"params" to the params handler; others are just status.
+          // Route the params reply; everything else is just status.
+          // Read the verb under either key: the gateway renamed it "op" -> "cmd"
+          // and a fleet is rarely reflashed all at once.
           try {
             final decoded = json.decode(txt);
-            if (decoded is Map<String, dynamic> && decoded['op'] == 'params') {
+            if (decoded is Map<String, dynamic> &&
+                commandVerb(decoded) == 'params') {
               _handleParamsResponse(decoded);
               return;
             }
@@ -1185,7 +1188,8 @@ class BleService extends ChangeNotifier {
   Future<void> requestParams() async {
     if (charCommand == null) { log(LogType.err, 'Not connected'); return; }
     try {
-      await charCommand!.write(utf8.encode('{"op":"get_params"}'), withoutResponse: false);
+      await charCommand!.write(utf8.encode(buildCommand('get_params')),
+          withoutResponse: false);
       log(LogType.tx, 'get_params');
     } catch (e) { log(LogType.err, 'get_params: $e'); }
   }
@@ -1194,7 +1198,7 @@ class BleService extends ChangeNotifier {
   Future<void> setParam(String key, String value) async {
     if (charCommand == null) { log(LogType.err, 'Not connected'); return; }
     try {
-      final payload = json.encode({'op': 'set_param', 'key': key, 'value': value});
+      final payload = buildCommand('set_param', {'key': key, 'value': value});
       await charCommand!.write(utf8.encode(payload), withoutResponse: false);
       log(LogType.tx, 'set $key');
     } catch (e) { log(LogType.err, 'set_param: $e'); }
@@ -1203,7 +1207,8 @@ class BleService extends ChangeNotifier {
   Future<void> saveAndReboot() async {
     if (charCommand == null) return;
     try {
-      await charCommand!.write(utf8.encode('{"op":"save_reboot"}'), withoutResponse: false);
+      await charCommand!.write(utf8.encode(buildCommand('save_reboot')),
+          withoutResponse: false);
       log(LogType.tx, 'save_reboot');
     } catch (e) { log(LogType.err, 'save_reboot: $e'); }
   }

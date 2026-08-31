@@ -51,7 +51,7 @@ void main() {
         expect(fixes.single.label, label);
         expect(fixes.single.kind, FixKind.stationFix);
         expect(json.decode(fixes.single.payload),
-            {'op': 'fix', 'code': code});
+            {'cmd': 'fix', 'op': 'fix', 'code': code});
         expect(fixes.single.needsConfirm, isFalse,
             reason: 'a reconnect interrupts nothing an operator cares about');
       }
@@ -67,11 +67,13 @@ void main() {
         expect(fixes, hasLength(2), reason: code);
         expect(fixes.first.kind, FixKind.ack,
             reason: 'the non-destructive option must come first');
-        expect(json.decode(fixes.first.payload), {'op': 'ack', 'code': code});
+        expect(json.decode(fixes.first.payload),
+            {'cmd': 'ack', 'op': 'ack', 'code': code});
         expect(fixes.first.needsConfirm, isFalse);
 
         expect(fixes.last.kind, FixKind.reboot);
-        expect(json.decode(fixes.last.payload), {'op': 'reboot'});
+        expect(json.decode(fixes.last.payload),
+            {'cmd': 'reboot', 'op': 'reboot'});
         expect(fixes.last.needsConfirm, isTrue,
             reason: 'a reboot drops every pod session');
       }
@@ -106,7 +108,8 @@ void main() {
         expect(fixes, hasLength(1), reason: pod(bit, 2).wordCode);
         expect(fixes.single.kind, FixKind.podUnlock);
         expect(json.decode(fixes.single.payload),
-            {'op': 'pod_action', 'slot': 2, 'action': 'unlock'});
+            {'cmd': 'pod_action', 'op': 'pod_action',
+             'slot': 2, 'action': 'unlock'});
         expect(fixes.single.needsConfirm, isTrue,
             reason: 'it physically releases a battery');
       }
@@ -140,6 +143,7 @@ void main() {
       expect(a.key, b.key);
       // Different pods stay independent.
       expect(fixesFor(pod(1, 1), totalPods: 2).single.key, isNot(a.key));
+      expect(json.decode(a.payload)['slot'], 2);
     });
   });
 
@@ -223,10 +227,58 @@ void main() {
           isNull);
       expect(FixResult.fromResponse({'op': 'set_param', 'key': 'wifi_ssid',
           'status': 'ok'}), isNull, reason: 'config ops are not fault fixes');
-      expect(FixResult.fromResponse({'cmd': 'reboot', 'status': 'ok'}), isNull,
-          reason: 'the legacy string command uses cmd, not op');
+      // {"cmd":"reboot"} is now the CURRENT protocol, not a legacy echo, so it
+      // must be recognised rather than dropped.
+      expect(FixResult.fromResponse({'cmd': 'reboot', 'status': 'ok'})!.key,
+          'reboot');
       expect(FixResult.fromResponse({'op': 'fix'}), isNull,
           reason: 'no status field');
+    });
+  });
+
+  group('protocol key — "op" renamed to "cmd" on 2026-08-31', () {
+    test('every command carries BOTH keys so either firmware accepts it', () {
+      for (final p in [
+        buildCommand('get_params'),
+        buildCommand('save_reboot'),
+        buildCommand('set_param', {'key': 'wifi_ssid', 'value': 'AP'}),
+        fixesFor(sta(2), totalPods: 2).single.payload,
+        fixesFor(pod(1, 1), totalPods: 2).single.payload,
+        ...fixesFor(sta(6), totalPods: 2).map((a) => a.payload),
+      ]) {
+        final j = json.decode(p) as Map<String, dynamic>;
+        expect(j['cmd'], isNotNull, reason: 'new firmware reads doc["cmd"]: $p');
+        expect(j['op'], j['cmd'], reason: 'old firmware reads doc["op"]: $p');
+      }
+    });
+
+    test('extra fields survive alongside the verb', () {
+      final j = json.decode(buildCommand('set_param',
+          {'key': 'mqtt_host', 'value': 'broker.example.com'}));
+      expect(j, {
+        'cmd': 'set_param', 'op': 'set_param',
+        'key': 'mqtt_host', 'value': 'broker.example.com',
+      });
+    });
+
+    test('replies are read under whichever key they arrive with', () {
+      expect(commandVerb({'cmd': 'params'}), 'params');
+      expect(commandVerb({'op': 'params'}), 'params');
+      expect(commandVerb({'cmd': 'params', 'op': 'stale'}), 'params',
+          reason: 'cmd wins — it is what current firmware sends');
+      expect(commandVerb({'status': 'ok'}), isNull);
+      expect(commandVerb({'cmd': 7}), isNull, reason: 'non-string is not a verb');
+    });
+
+    test('a fix reply parses from either generation', () {
+      for (final j in [
+        {'cmd': 'fix', 'code': 'WIFI_DOWN', 'status': 'ok'},
+        {'op': 'fix', 'code': 'WIFI_DOWN', 'status': 'ok'},
+      ]) {
+        final r = FixResult.fromResponse(j)!;
+        expect(r.ok, isTrue);
+        expect(r.key, 'fix:WIFI_DOWN');
+      }
     });
   });
 }

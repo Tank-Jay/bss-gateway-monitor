@@ -15,6 +15,25 @@ import 'dart:convert';
 
 import 'faults.dart';
 
+/// Build a command payload BOTH firmware generations accept.
+///
+/// The gateway's JSON command key was renamed `"op"` -> `"cmd"` in
+/// BLE_handler.cpp on 2026-08-31. Firmware from before that reads `doc["op"]`
+/// and ignores `cmd`; firmware after it reads `doc["cmd"]` and ignores `op`.
+/// Emitting both means one APK drives a fleet that is only partly reflashed,
+/// for about twelve extra bytes on a characteristic with a 512-byte budget.
+///
+/// An unknown key is simply absent to the other generation — neither firmware
+/// errors on the one it does not recognise, because both fetch by name.
+String buildCommand(String verb, [Map<String, dynamic> extra = const {}]) =>
+    json.encode({'cmd': verb, 'op': verb, ...extra});
+
+/// The verb out of a gateway reply, whichever key it arrived under.
+String? commandVerb(Map<String, dynamic> j) {
+  final v = j['cmd'] ?? j['op'];
+  return v is String ? v : null;
+}
+
 /// What the op does, so the UI can style and confirm appropriately.
 enum FixKind {
   /// Re-pulses one pod's lock GPIO. Physically moves hardware.
@@ -91,7 +110,7 @@ const Map<String, String> kStationFixDescriptions = {
   'TIME_UNSYNCED': 'Re-arm and re-probe the NTP time sync.',
 };
 
-/// Word codes the firmware will clear via `{"op":"ack"}`.
+/// Word codes the firmware will clear via `{"cmd":"ack"}`.
 /// Mirrors the `Fault_Clear(...)` ladder in the `"ack"` branch.
 const Set<String> kAckableCodes = {
   'BROWNOUT',
@@ -125,8 +144,8 @@ List<FixAction> fixesFor(FaultCode f, {required int totalPods}) {
         label: 'UNLOCK',
         description: 'Re-pulse the lock on slot ${f.slot}.',
         kind: FixKind.podUnlock,
-        payload: json.encode(
-            {'op': 'pod_action', 'slot': f.slot, 'action': 'unlock'}),
+        payload: buildCommand(
+            'pod_action', {'slot': f.slot, 'action': 'unlock'}),
         key: 'pod_action:unlock:${f.slot}',
       ),
     ];
@@ -139,7 +158,7 @@ List<FixAction> fixesFor(FaultCode f, {required int totalPods}) {
         label: stationLabel,
         description: kStationFixDescriptions[code] ?? '',
         kind: FixKind.stationFix,
-        payload: json.encode({'op': 'fix', 'code': code}),
+        payload: buildCommand('fix', {'code': code}),
         key: 'fix:$code',
       ),
     ];
@@ -155,7 +174,7 @@ List<FixAction> fixesFor(FaultCode f, {required int totalPods}) {
         label: 'CLEAR',
         description: 'Clear the $code latch without restarting.',
         kind: FixKind.ack,
-        payload: json.encode({'op': 'ack', 'code': code}),
+        payload: buildCommand('ack', {'code': code}),
         key: 'ack:$code',
       ),
       const FixAction(
@@ -163,7 +182,7 @@ List<FixAction> fixesFor(FaultCode f, {required int totalPods}) {
         description: 'Restart the gateway. Drops the BLE link and all pod '
             'sessions.',
         kind: FixKind.reboot,
-        payload: '{"op":"reboot"}',
+        payload: '{"cmd":"reboot","op":"reboot"}',
         key: 'reboot',
       ),
     ];
@@ -253,8 +272,8 @@ class FixResult {
   static const Set<String> _fixOps = {'pod_action', 'fix', 'ack', 'reboot'};
 
   static FixResult? fromResponse(Map<String, dynamic> j) {
-    final op = j['op'];
-    if (op is! String || !_fixOps.contains(op)) return null;
+    final op = commandVerb(j);
+    if (op == null || !_fixOps.contains(op)) return null;
     final status = j['status'];
     if (status is! String) return null;
     return FixResult(
