@@ -133,20 +133,48 @@ const Set<String> kUnlockableCodes = {
 /// against the BLE array cap — offering a button for a slot beyond that would
 /// return `"status":"error"` on every press. Pass 0 when the count is not
 /// known yet and the unlock is withheld rather than guessed.
+/// The unlock pulse for one slot, independent of any fault.
+///
+/// The gateway accepts `pod_action` for any slot it has — the fault is not part
+/// of the check (`BLE_handler.cpp`, the `pod_action` branch) — so an operator
+/// can release a battery whose lock is simply stuck, with nothing reported.
+/// [fixesFor] raises the same action when LOCK_FAIL or LOCK_STUCK is active.
+///
+/// Returns null when [slot] is outside what the station reports, so a button is
+/// never offered for a slot the gateway would answer `"status":"error"` on.
+/// Pass `totalPods: 0` before the first summary and the unlock is withheld
+/// rather than guessed.
+///
+/// The key is deliberately identical to the fault-driven one: one pulse
+/// resolves either, so pressing from the pod page must damp the button on the
+/// Diagnostics page too.
+FixAction? unlockActionFor(int slot, {required int totalPods}) {
+  if (slot < 1 || slot > totalPods) return null;
+  return FixAction(
+    label: 'UNLOCK SLOT $slot',
+    description: 'Re-pulse the lock on slot $slot. '
+        'This physically releases the battery in that bay.',
+    kind: FixKind.podUnlock,
+    payload: buildCommand('pod_action', {'slot': slot, 'action': 'unlock'}),
+    key: 'pod_action:unlock:$slot',
+  );
+}
+
 List<FixAction> fixesFor(FaultCode f, {required int totalPods}) {
   final code = f.wordCode;
 
   if (!f.isStation) {
     if (!kUnlockableCodes.contains(code)) return const [];
-    if (f.slot < 1 || f.slot > totalPods) return const [];
+    final a = unlockActionFor(f.slot, totalPods: totalPods);
+    if (a == null) return const [];
+    // Shorter label in a fault row, where the slot is already on the line.
     return [
       FixAction(
         label: 'UNLOCK',
-        description: 'Re-pulse the lock on slot ${f.slot}.',
-        kind: FixKind.podUnlock,
-        payload: buildCommand(
-            'pod_action', {'slot': f.slot, 'action': 'unlock'}),
-        key: 'pod_action:unlock:${f.slot}',
+        description: a.description,
+        kind: a.kind,
+        payload: a.payload,
+        key: a.key,
       ),
     ];
   }

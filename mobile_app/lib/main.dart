@@ -1657,6 +1657,75 @@ Widget _faultChip(FaultCode f) {
 /// Hidden only when code == "OK". Deliberately NOT hidden on sev == 0: STA-10
 /// (low memory) is a real INFO fault that also reports sev 0, so gating on
 /// severity would silently swallow it.
+/// On-demand lock release for one slot.
+///
+/// Separate from the fault-driven Fix buttons on purpose: the commonest reason
+/// to unlock is that a customer cannot get their battery out, which reports no
+/// fault at all. Shown on the pod page even when the slot is offline or empty,
+/// because a stuck lock on an empty bay is exactly when this is needed.
+Widget _unlockCard(BuildContext context, BleService ble, int podNum) {
+  final action = unlockActionFor(podNum, totalPods: ble.totalPods);
+
+  if (action == null) {
+    // Slot beyond what the station reports, or no summary yet. Say which,
+    // rather than showing a button the gateway would reject.
+    return _Card(
+      title: const Text('LOCK'),
+      child: Text(
+        ble.totalPods > 0
+            ? 'Slot $podNum is not one of this station\'s ${ble.totalPods} pods.'
+            : 'Waiting for the pod summary before offering an unlock.',
+        style: TextStyle(fontSize: 11, color: Palette.textDim, height: 1.5),
+      ),
+    );
+  }
+
+  final left = ble.fixCooldowns.remaining(action.key, DateTime.now());
+  final cooling = left > 0;
+  final connected = ble.state == ConnectionState.connected;
+
+  return _Card(
+    title: const Text('LOCK'),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(
+        'Pulses the lock GPIO for slot $podNum. Works whether or not the slot '
+        'reports a fault.',
+        style: TextStyle(fontSize: 11, color: Palette.textDim, height: 1.5),
+      ),
+      const SizedBox(height: 12),
+      SizedBox(
+        width: double.infinity,
+        height: 46,
+        child: OutlinedButton.icon(
+          onPressed: (cooling || !connected)
+              ? null
+              : () => _runFix(context, ble, action),
+          icon: Icon(Icons.lock_open,
+            size: 18, color: cooling || !connected ? Palette.textDim : Palette.warn),
+          label: Text(
+            !connected
+                ? 'NOT CONNECTED'
+                : cooling
+                    ? 'UNLOCK SLOT $podNum   ${left}s'
+                    : 'UNLOCK SLOT $podNum',
+            style: TextStyle(
+              fontWeight: FontWeight.w900,
+              fontSize: 13,
+              letterSpacing: 0.8,
+              color: cooling || !connected ? Palette.textDim : Palette.warn,
+            ),
+          ),
+          style: OutlinedButton.styleFrom(
+            side: BorderSide(
+              color: cooling || !connected ? Palette.border : Palette.warn),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        ),
+      ),
+    ]),
+  );
+}
+
 /// WiFi / MQTT / SD chips plus RSSI, from Station Info (spec §6 Screen A header).
 ///
 /// The firmware sends these as the strings "yes"/"no", not booleans — see
@@ -2331,12 +2400,14 @@ class _PodDetailTabState extends State<PodDetailTab> {
           ),
         ),
         ..._podFaultCards(podNum),
+        _unlockCard(context, widget.ble, podNum),
       ];
     }
 
     return [
       _socBar(d),
       ..._podFaultCards(podNum),
+      _unlockCard(context, widget.ble, podNum),
       _Card(
         title: const Text('TELEMETRY'),
         child: GridView.count(

@@ -281,4 +281,66 @@ void main() {
       }
     });
   });
+
+  group('unlockActionFor — on-demand lock release', () {
+    test('builds the same pod_action the firmware expects', () {
+      final a = unlockActionFor(2, totalPods: 2)!;
+      expect(a.kind, FixKind.podUnlock);
+      expect(json.decode(a.payload), {
+        'cmd': 'pod_action', 'op': 'pod_action',
+        'slot': 2, 'action': 'unlock',
+      });
+      expect(a.needsConfirm, isTrue,
+          reason: 'it physically releases a battery');
+      expect(a.label, contains('2'),
+          reason: 'the standalone button must name the slot it will open');
+    });
+
+    test('is offered for a healthy pod with no fault at all', () {
+      // The whole point: the commonest reason to unlock is a customer who
+      // cannot get their battery out, which reports nothing.
+      for (var slot = 1; slot <= 2; slot++) {
+        expect(unlockActionFor(slot, totalPods: 2), isNotNull);
+      }
+    });
+
+    test('withheld for a slot the station does not have', () {
+      expect(unlockActionFor(3, totalPods: 2), isNull);
+      expect(unlockActionFor(0, totalPods: 2), isNull);
+      expect(unlockActionFor(-1, totalPods: 2), isNull);
+      expect(unlockActionFor(3, totalPods: 3), isNotNull);
+    });
+
+    test('withheld before the pod count is known', () {
+      expect(unlockActionFor(1, totalPods: 0), isNull);
+    });
+
+    test('shares its cooldown key with the fault-driven button', () {
+      // One pulse resolves either, so pressing UNLOCK on the pod page must damp
+      // the UNLOCK on the Diagnostics page, and the reply must release both.
+      final onDemand = unlockActionFor(2, totalPods: 2)!;
+      final fromFault = fixesFor(pod(1, 2), totalPods: 2).single;
+      expect(onDemand.key, fromFault.key);
+      expect(onDemand.payload, fromFault.payload);
+
+      final c = FixCooldowns();
+      c.mark(onDemand.key, t0);
+      expect(c.isCooling(fromFault.key, t0), isTrue);
+
+      final reply = FixResult.fromResponse({
+        'cmd': 'pod_action', 'slot': 2, 'action': 'unlock', 'status': 'error',
+      })!;
+      expect(reply.key, onDemand.key,
+          reason: 'a rejection must release the button that sent it');
+    });
+
+    test('slots stay independent of each other', () {
+      final a = unlockActionFor(1, totalPods: 2)!;
+      final b = unlockActionFor(2, totalPods: 2)!;
+      expect(a.key, isNot(b.key));
+      final c = FixCooldowns();
+      c.mark(a.key, t0);
+      expect(c.isCooling(b.key, t0), isFalse);
+    });
+  });
 }
