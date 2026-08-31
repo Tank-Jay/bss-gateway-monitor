@@ -269,6 +269,13 @@ class FixResult {
     return 'Rejected by gateway';
   }
 
+  /// Verbs whose replies are a fault-fix outcome.
+  ///
+  /// Deliberately NOT widened to set_param / save_reboot / factory_reset. Those
+  /// replies share the {verb, status} shape, but a FixResult sets
+  /// [BleService.lastFixResult], which drives fix-outcome UI and releases a Fix
+  /// button's cooldown — a config write must not do either. Their outcome is
+  /// already visible: the response listener logs every frame verbatim.
   static const Set<String> _fixOps = {'pod_action', 'fix', 'ack', 'reboot'};
 
   static FixResult? fromResponse(Map<String, dynamic> j) {

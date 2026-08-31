@@ -625,6 +625,10 @@ class BleService extends ChangeNotifier {
   ConnectionState state = ConnectionState.disconnected;
   String? deviceName;
   int readCount = 0;
+
+  /// When the last Pod Summary frame arrived, notify or read. Drives the
+  /// LIVE badge — a blinking LIVE over a frozen card is worse than none.
+  DateTime? lastSummaryAt;
   int selectedPod = 1;
 
   Map<String, dynamic>? stationInfo;
@@ -787,6 +791,18 @@ class BleService extends ChangeNotifier {
         log(LogType.err, 'MTU request failed: $e');
       }
 
+      // Android caches the GATT table per MAC address. A phone that met a
+      // build of this gateway from before the Diagnostics service existed
+      // keeps serving the old 3-service table, so e1ec0004 is never
+      // discovered and the Faults tab insists the firmware predates it.
+      if (Platform.isAndroid) {
+        try {
+          await device!.clearGattCache();
+        } catch (e) {
+          log(LogType.info, 'GATT cache flush skipped: $e');
+        }
+      }
+
       // Discover services
       log(LogType.info, 'Discovering services...');
       final services = await device!.discoverServices();
@@ -816,7 +832,14 @@ class BleService extends ChangeNotifier {
 
       if (charStation == null || charSummary == null || charSelect == null ||
           charDetail == null || charCommand == null || charResponse == null) {
-        log(LogType.err, 'Missing one or more characteristics');
+        log(LogType.err, 'Missing characteristics: ${[
+          if (charStation == null) 'station',
+          if (charSummary == null) 'summary',
+          if (charSelect == null) 'select',
+          if (charDetail == null) 'detail',
+          if (charCommand == null) 'command',
+          if (charResponse == null) 'response',
+        ].join(', ')}');
         await device!.disconnect();
         return;
       }
@@ -832,10 +855,22 @@ class BleService extends ChangeNotifier {
           podSummary = json.decode(txt) as Map<String, dynamic>;
           readCount++;
           _recordSample(podSummary);
+          lastSummaryAt = DateTime.now();
           log(LogType.rx, 'SUMMARY (${txt.length}B)');
           notifyListeners();
         } catch (e) { log(LogType.err, 'Summary parse: $e'); }
       });
+
+      // Prime the card from a READ. e1ec0201 is READ + NOTIFY, and until now
+      // the app only ever subscribed: if the CCCD write was rejected, or the
+      // MTU stayed at 23 so every notify truncated and json.decode threw, the
+      // card sat on "waiting" forever with nothing the operator could tap.
+      // The listener above picks this response up via lastValueStream.
+      try {
+        await charSummary!.read();
+      } catch (e) {
+        log(LogType.err, 'Summary prime: $e');
+      }
 
       // Subscribe to Response notify
       await charResponse!.setNotifyValue(true);
@@ -924,6 +959,11 @@ class BleService extends ChangeNotifier {
 
     } catch (e) {
       log(LogType.err, 'Connect failed: $e');
+      // Release the link. The gateway only re-advertises after a real
+      // disconnect, so an abandoned half-open connection makes it invisible
+      // to the next scan and the operator cannot even re-pick it.
+      try { await device?.disconnect(); } catch (_) {}
+      _cleanup();
       _setState(ConnectionState.disconnected);
       // Only keep retrying if we were already in a retry cycle. A failed
       // *manual* connect stops here — the user is standing there and can see
@@ -1083,7 +1123,43 @@ class BleService extends ChangeNotifier {
     } catch (e) { log(LogType.err, 'Pod Select: $e'); }
   }
 
+  /// Read Pod Summary on demand.
+  ///
+  /// Relying on the notify alone left no way back from a failed
+  /// subscription, which is the likeliest cause of a permanently empty
+  /// dashboard.
+  Future<void> readPodSummary() async {
+    if (charSummary == null) return;
+    // lastValueStream replays read responses, so when the subscription is
+    // live the listener has already decoded this frame; decoding it here too
+    // would double-count readCount and log every frame twice.
+    if (_summarySub != null) {
+      try {
+        await charSummary!.read();
+      } catch (e) {
+        log(LogType.err, 'Summary read: $e');
+      }
+      return;
+    }
+    try {
+      log(LogType.tx, 'READ Pod Summary');
+      final val = await charSummary!.read();
+      final txt = utf8.decode(val);
+      podSummary = json.decode(txt) as Map<String, dynamic>;
+      readCount++;
+      lastSummaryAt = DateTime.now();
+      _recordSample(podSummary);
+      log(LogType.rx, 'SUMMARY (${txt.length}B)');
+      notifyListeners();
+    } catch (e) {
+      log(LogType.err, 'Summary read: $e');
+    }
+  }
+
   Future<void> readPodDetail() async {
+    // A failed read must not leave the previous pod's numbers on screen.
+    podDetail = null;
+    notifyListeners();
     if (charSelect != null) {
       try { await charSelect!.write(utf8.encode('$selectedPod'), withoutResponse: false); } catch (_) {}
     }
@@ -1581,6 +1657,70 @@ Widget _faultChip(FaultCode f) {
 /// Hidden only when code == "OK". Deliberately NOT hidden on sev == 0: STA-10
 /// (low memory) is a real INFO fault that also reports sev 0, so gating on
 /// severity would silently swallow it.
+/// WiFi / MQTT / SD chips plus RSSI, from Station Info (spec §6 Screen A header).
+///
+/// The firmware sends these as the strings "yes"/"no", not booleans — see
+/// BLE_BuildStationJson in BLE_handler.cpp — so anything that is not exactly
+/// "yes" reads as down rather than being coerced.
+Widget _healthChips(Map<String, dynamic> s) {
+  Widget chip(String label, bool up, IconData icon) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: (up ? Palette.success : Palette.danger).withValues(alpha: 0.13),
+          border: Border.all(color: up ? Palette.success : Palette.danger),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 13, color: up ? Palette.success : Palette.danger),
+          const SizedBox(width: 5),
+          Text(label,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.5,
+              color: up ? Palette.success : Palette.danger)),
+        ]),
+      );
+
+  final rssi = (s['wifi_rssi'] as num?)?.toInt();
+  // -67 dBm is the usual floor for reliable streaming; -80 is close to unusable.
+  final rssiColor = rssi == null
+      ? Palette.textDim
+      : rssi >= -67
+          ? Palette.success
+          : rssi >= -80
+              ? Palette.warn
+              : Palette.danger;
+
+  return Padding(
+    padding: const EdgeInsets.only(bottom: 12),
+    child: Wrap(spacing: 8, runSpacing: 8, children: [
+      chip('WIFI', s['wifi'] == 'yes', Icons.wifi),
+      chip('MQTT', s['mqtt'] == 'yes', Icons.cloud_outlined),
+      chip('SD', s['sd'] == 'yes', Icons.sd_card_outlined),
+      if (rssi != null)
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: rssiColor.withValues(alpha: 0.13),
+            border: Border.all(color: rssiColor),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(Icons.signal_cellular_alt, size: 13, color: rssiColor),
+            const SizedBox(width: 5),
+            Text('$rssi dBm',
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+                color: rssiColor,
+                fontFamily: 'monospace')),
+          ]),
+        ),
+    ]),
+  );
+}
+
 Widget _mainErrorBanner(MainFault m, {VoidCallback? onTap}) {
   final c = _sevColor(m.sev);
   return Container(
@@ -1642,12 +1782,17 @@ class DashboardTab extends StatelessWidget {
     final s = ble.stationInfo;
     final p = ble.podSummary;
     final station = ble.faults.primary;
+    // Spec §6: with several sids reporting, the top-level banner takes the
+    // highest severity across all of them — not whichever station happened to
+    // notify first. worstMain already ignores stations reporting OK.
+    final worst = ble.faults.worstMain;
 
     return RefreshIndicator(
       color: Palette.accent,
       backgroundColor: Palette.card,
       onRefresh: () async {
         await ble.readStationInfo();
+        await ble.readPodSummary();
         await ble.readFaults();
       },
       child: SingleChildScrollView(
@@ -1665,8 +1810,10 @@ class DashboardTab extends StatelessWidget {
               ),
             ),
           // MAIN ERROR banner — the one fault to act on first.
-          if (station != null && !station.main.isOk)
-            _mainErrorBanner(station.main, onTap: onOpenDiagnostics),
+          if (worst != null) _mainErrorBanner(worst, onTap: onOpenDiagnostics),
+          // Link health straight off Station Info. These three drive most
+          // "why is it not reporting" calls, and §6 asks for them in the header.
+          if (s != null) _healthChips(s),
           _Card(
             title: const Text('STATION INFO'),
             action: _refreshBtn(() => ble.readStationInfo()),
@@ -1682,6 +1829,8 @@ class DashboardTab extends StatelessWidget {
                   _DataItem(label: 'Station ID', value: '${s['station_id'] ?? '--'}', color: Palette.accent),
                   _DataItem(label: 'Slaves', value: '${s['slaves'] ?? '--'}', unit: 'pods', color: Palette.cap),
                   _DataItem(label: 'IP', value: '${s['ip'] ?? '--'}', color: Palette.volt),
+                  _DataItem(label: 'AP', value: '${s['wifi_ssid'] ?? '--'}', color: Palette.accent),
+                  _DataItem(label: 'Free Heap', value: '${s['free_heap'] ?? '--'}', unit: 'B', color: Palette.cap),
                   _DataItem(label: 'Faults', value: '0x${(s['fault'] as num? ?? 0).toInt().toRadixString(16).toUpperCase().padLeft(2,'0')}',
                     color: (s['fault'] as num? ?? 0) == 0 ? Palette.success : Palette.danger),
                 ],
@@ -1701,8 +1850,19 @@ class DashboardTab extends StatelessWidget {
             ]),
           ),
           _Card(
-            title: Row(children: const [Text('POD SUMMARY'), SizedBox(width: 8), _LiveDot()]),
-            action: _refreshBtn(() {/* auto-notify handles it */}, label: 'LIVE'),
+            title: Row(children: [
+              const Text('POD SUMMARY'),
+              const SizedBox(width: 8),
+              // Gated on a real frame, the way the faults card already is.
+              if (ble.lastSummaryAt != null &&
+                  DateTime.now().difference(ble.lastSummaryAt!) < kFaultStale)
+                const _LiveDot()
+              else
+                Text('STALE',
+                  style: TextStyle(
+                    fontSize: 10, color: Palette.warn, fontWeight: FontWeight.w700)),
+            ]),
+            action: _refreshBtn(() => ble.readPodSummary(), label: 'LIVE'),
             child: p == null ? _noData(hint: 'Waiting for auto-notify...') : Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -2086,7 +2246,14 @@ class _PodDetailTabState extends State<PodDetailTab> {
   Widget _buildPodPage(BuildContext context, int podNum, Map<String, dynamic>? d) {
     final ble = widget.ble;
     // Only show data if it's for the currently-viewed pod
-    final data = (ble.selectedPod == podNum) ? d : null;
+    // Trust the payload's own `pod` field, not just our local selection:
+    // selectPod() updates selectedPod synchronously, before any GATT
+    // traffic, while podDetail still holds the PREVIOUS pod's JSON. Without
+    // this the header can read POD 3 OF 5 above pod 2's telemetry.
+    final int? dPod = (d?['pod'] as num?)?.toInt();
+    final bool forThisPod =
+        d != null && (dPod == podNum || (d['error'] != null && dPod == null));
+    final data = (ble.selectedPod == podNum && forThisPod) ? d : null;
     return RefreshIndicator(
       color: Palette.accent,
       backgroundColor: Palette.card,
@@ -2107,7 +2274,7 @@ class _PodDetailTabState extends State<PodDetailTab> {
           ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(5, (i) {
+            children: List.generate(ble.podPageCount, (i) {
               final active = podNum == (i + 1);
               return Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -2520,6 +2687,12 @@ class SettingsTab extends StatelessWidget {
                 _paramRow(context, 'WiFi Password', 'wifi_pass', ble.params!['wifi_pass'], Icons.lock, true),
                 _paramRow(context, 'MQTT Host', 'mqtt_host', ble.params!['mqtt_host'], Icons.cloud, false),
                 _paramRow(context, 'MQTT Port', 'mqtt_port', '${ble.params!['mqtt_port'] ?? '--'}', Icons.numbers, false, isNumeric: true),
+                // The firmware has always accepted these (BLE_SetParam) and
+                // Mqtt_handler passes them to client.connect(), but the app
+                // dropped them from the params dump, so a credentialed broker
+                // could not be configured from the phone at all.
+                _paramRow(context, 'MQTT User', 'mqtt_user', '${ble.params!['mqtt_user'] ?? '--'}', Icons.person, false),
+                _paramRow(context, 'MQTT Password', 'mqtt_pass', '${ble.params!['mqtt_pass'] ?? '--'}', Icons.key, true),
                 const SizedBox(height: 10),
                 SizedBox(
                   width: double.infinity,
