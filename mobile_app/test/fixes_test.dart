@@ -210,6 +210,36 @@ void main() {
       expect(r.message, contains('pod 9'));
     });
 
+    test('a rejection prefers the gateway own reason over the guess', () {
+      // The firmware rejects an unlock for several reasons, only one of which
+      // is a bad slot. Reporting "out of range" for a pod that is simply
+      // offline sends the operator after the wrong problem.
+      final r = FixResult.fromResponse({
+        'cmd': 'pod_action',
+        'slot': 3,
+        'action': 'unlock',
+        'status': 'error',
+        'cmd_word': 0,
+        'msg': 'pod offline',
+      })!;
+      expect(r.ok, isFalse);
+      expect(r.message, contains('pod offline'));
+      expect(r.message, isNot(contains('out of range')));
+    });
+
+    test('an accepted unlock echoes the command word that went on the bus', () {
+      final r = FixResult.fromResponse({
+        'cmd': 'pod_action',
+        'slot': 3,
+        'action': 'unlock',
+        'status': 'ok',
+        'cmd_word': 259,
+        'msg': '',
+      })!;
+      expect(r.ok, isTrue);
+      expect(r.message, 'Accepted');
+    });
+
     test('the key round-trips from the action that produced it', () {
       // A reply must be able to release the cooldown the press created.
       final action = fixesFor(pod(1, 2), totalPods: 2).single;

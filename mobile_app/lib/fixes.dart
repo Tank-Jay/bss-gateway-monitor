@@ -267,11 +267,17 @@ class FixResult {
 
   final bool ok;
 
+  /// The gateway's own reason for a rejection (`msg` in the reply), empty when
+  /// it sent none. Firmware that predates the field, or an op that carries no
+  /// reason, leaves this empty and [message] falls back to a generic line.
+  final String msg;
+
   const FixResult({
     required this.op,
     required this.code,
     required this.slot,
     required this.ok,
+    this.msg = '',
   });
 
   /// The [FixAction.key] this reply corresponds to, so a cooldown can be
@@ -293,6 +299,11 @@ class FixResult {
 
   String get message {
     if (ok) return 'Accepted';
+    // The gateway rejects an unlock for several different reasons — the pod is
+    // offline, another pod command is still queued, the slot is wrong. Showing
+    // its own `msg` is the difference between the operator retrying in a second
+    // and hunting a slot number that was never the problem.
+    if (msg.isNotEmpty) return 'Rejected — $msg';
     if (op == 'pod_action') return 'Rejected — pod $slot out of range';
     return 'Rejected by gateway';
   }
@@ -316,6 +327,7 @@ class FixResult {
       code: (j['code'] as String?) ?? '',
       slot: (j['slot'] as num?)?.toInt() ?? 0,
       ok: status == 'ok',
+      msg: (j['msg'] as String?) ?? '',
     );
   }
 }
