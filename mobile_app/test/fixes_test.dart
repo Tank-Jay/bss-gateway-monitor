@@ -207,7 +207,7 @@ void main() {
       final r = FixResult.fromResponse(
           {'op': 'pod_action', 'slot': 9, 'action': 'unlock', 'status': 'error'})!;
       expect(r.ok, isFalse);
-      expect(r.message, contains('slot 9'));
+      expect(r.message, contains('pod 9'));
     });
 
     test('the key round-trips from the action that produced it', () {

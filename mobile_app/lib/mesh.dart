@@ -278,13 +278,13 @@ List<int>? stripStatusOpcode(List<int> access) {
 ///
 /// The mesh payload drops `msg` to stay small over the air (§8.3), so the app
 /// regenerates it from the same tables the gateway used. Composition matches
-/// Fault_MainError() exactly — `"Slot %u %s"` for a pod fault, the bare
+/// Fault_MainError() exactly — `"Pod %u %s"` for a pod fault, the bare
 /// station text otherwise — so a station reached over mesh and the same
 /// station reached over GATT never word the same fault two different ways.
 String meshMainMessage(String code, int slot) {
   if (code == 'OK') return '';
   final pb = podBitForCode(code);
-  if (pb != null) return 'Slot $slot ${kPodText[pb]}';
+  if (pb != null) return 'Pod $slot ${kPodText[pb]}';
   final sb = staBitForCode(code);
   if (sb != null) return kStaText[sb];
   if (code == kStaCodeUnknown) return kUnknownFaultText;

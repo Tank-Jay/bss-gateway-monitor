@@ -17,6 +17,8 @@ import 'package:fl_chart/fl_chart.dart';
 import 'faults.dart';
 import 'fixes.dart';
 import 'mesh.dart';
+import 'health.dart';
+import 'theme.dart';
 
 // ══════════════════════════════════════════════════════════════
 //  BLE UUIDs — must match BLE_handler.h
@@ -43,6 +45,10 @@ class BleUuids {
   static final charCommand = Guid('e1ec0301-1234-4321-abcd-0123456789ab');
   static final charResponse= Guid('e1ec0302-1234-4321-abcd-0123456789ab');
   static final charFaults  = Guid('e1ec0401-1234-4321-abcd-0123456789ab');
+  // Added with the connect-snapshot firmware. Both are OPTIONAL: an older
+  // gateway simply does not expose them and the app must still work.
+  static final charLocks   = Guid('e1ec0204-1234-4321-abcd-0123456789ab');
+  static final charHealth  = Guid('e1ec0402-1234-4321-abcd-0123456789ab');
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -63,46 +69,48 @@ class _Colors {
   });
 }
 
-const _darkColors = _Colors(
-  bg: Color(0xFF0F1923),
-  card: Color(0xFF1A2733),
-  border: Color(0xFF2A3A4A),
-  accent: Color(0xFF00D4AA),
-  text: Color(0xFFE0E8F0),
-  textDim: Color(0xFF8899AA),
-  success: Color(0xFF00CC66),
-  warn: Color(0xFFFFAA00),
-  danger: Color(0xFFFF4444),
-  volt: Color(0xFF4FC3F7),
-  curr: Color(0xFFFFB74D),
-  soc: Color(0xFF81C784),
-  soh: Color(0xFFCE93D8),
-  temp: Color(0xFFEF5350),
-  cycle: Color(0xFF90A4AE),
-  cap: Color(0xFF4DD0E1),
-  dataBg: Color(0xFF0F1923),
-  logBg: Color(0xFF0A0F14),
+final _darkColors = _Colors(
+  bg: AppTokens.dark.bg,            // --bg      #0D0D0F
+  card: AppTokens.dark.card,        // --card    #17171C
+  border: AppTokens.dark.border,    // --border  rgba(255,255,255,.09)
+  accent: AppTokens.dark.gold,      // --gold    #C9A96E
+  text: AppTokens.dark.text,        // --text
+  textDim: AppTokens.dark.textMid,  // --text-mid
+  success: AppTokens.dark.green,    // --green   #22D3A4
+  warn: AppTokens.dark.amber,       // --amber   #F59E0B
+  danger: AppTokens.dark.red,       // --red     #FF6B6B
+  // Data series. The first five ride the stylesheet's own ramp; cycle and
+  // cap are the two extra hues the web app never needed, tuned to sit in it.
+  volt: AppTokens.dark.blue,        // --blue    #818CF8
+  curr: AppTokens.dark.amber,
+  soc: AppTokens.dark.green,
+  soh: AppTokens.dark.goldMid,
+  temp: AppTokens.dark.red,
+  cycle: const Color(0xFF8B8B9A),
+  cap: const Color(0xFF5EC8D8),
+  dataBg: AppTokens.dark.card2,     // --card-2  #1E1E25
+  logBg: AppTokens.dark.console,    // .console  #08080A
 );
 
-const _lightColors = _Colors(
-  bg: Color(0xFFF0F4F8),
-  card: Color(0xFFFFFFFF),
-  border: Color(0xFFD0DAE6),
-  accent: Color(0xFF00A882),
-  text: Color(0xFF1A2733),
-  textDim: Color(0xFF5A7080),
-  success: Color(0xFF00A855),
-  warn: Color(0xFFE09000),
-  danger: Color(0xFFE03333),
-  volt: Color(0xFF0288D1),
-  curr: Color(0xFFEF6C00),
-  soc: Color(0xFF388E3C),
-  soh: Color(0xFF7B1FA2),
-  temp: Color(0xFFD32F2F),
-  cycle: Color(0xFF546E7A),
-  cap: Color(0xFF00838F),
-  dataBg: Color(0xFFE8F0F8),
-  logBg: Color(0xFFE0E8F0),
+final _lightColors = _Colors(
+  bg: AppTokens.light.bg,           // --bg      #F7F6F3
+  card: AppTokens.light.card,       // --card    #ffffff
+  border: AppTokens.light.border,   // --border  #e5e7eb
+  accent: AppTokens.light.gold,     // --gold    #D4654A (terracotta, not gold)
+  text: AppTokens.light.text,       // --text    #111827
+  textDim: AppTokens.light.textMid, // --text-mid #4b5563
+  success: AppTokens.light.green,   // --green   #15803d
+  warn: AppTokens.light.amber,      // --amber   #b45309
+  danger: AppTokens.light.red,      // --red     #dc2626
+  volt: AppTokens.light.blue,       // --blue    #4f46e5
+  curr: AppTokens.light.amber,
+  soc: AppTokens.light.green,
+  soh: AppTokens.light.goldDark,
+  temp: AppTokens.light.red,
+  cycle: const Color(0xFF6B7280),
+  cap: const Color(0xFF0E7490),
+  dataBg: AppTokens.light.card2,    // --card-2  #F4F3EF
+  logBg: AppTokens.light.console,   // .console  #faf9f6
 );
 
 /// Theme controller — notifier-driven so toggle rebuilds entire app.
@@ -364,6 +372,7 @@ class BssApp extends StatelessWidget {
       valueListenable: themeModeNotifier,
       builder: (_, mode, __) {
         final isLight = mode == ThemeMode.light;
+        Tone.light = isLight;   // keeps theme.dart's token lookups in step
         SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle(
           statusBarColor: Palette.card,
           statusBarIconBrightness: isLight ? Brightness.dark : Brightness.light,
@@ -380,18 +389,10 @@ class BssApp extends StatelessWidget {
     );
   }
 
-  ThemeData _buildTheme(bool dark) {
-    final c = dark ? _darkColors : _lightColors;
-    return ThemeData(
-      useMaterial3: true,
-      brightness: dark ? Brightness.dark : Brightness.light,
-      scaffoldBackgroundColor: c.bg,
-      fontFamily: 'Roboto',
-      colorScheme: dark
-        ? ColorScheme.dark(primary: c.accent, surface: c.card, error: c.danger)
-        : ColorScheme.light(primary: c.accent, surface: c.card, error: c.danger),
-    );
-  }
+  /// Appearance lives entirely in theme.dart, which is a port of the
+  /// Electica Service stylesheet. Nothing about how the monitor behaves
+  /// is decided here.
+  ThemeData _buildTheme(bool dark) => buildAppTheme(dark);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -621,6 +622,11 @@ class BleService extends ChangeNotifier {
   // the six above because it must stay OPTIONAL — see the completeness check
   // in connectToDevice(), which would otherwise refuse older gateways.
   BluetoothCharacteristic? charFaults;
+  // Pod Locks (e1ec0204) and Health (e1ec0402) arrived with the connect-snapshot
+  // firmware. Optional for the same reason charFaults is: refusing to connect to
+  // a gateway that predates them would strand every station in the field that
+  // has not been flashed yet.
+  BluetoothCharacteristic? charLocks, charHealth;
 
   ConnectionState state = ConnectionState.disconnected;
   String? deviceName;
@@ -638,6 +644,16 @@ class BleService extends ChangeNotifier {
 
   /// Latest Diagnostics payload per station id. Upsert-only — see FaultsStore.
   final FaultsStore faults = FaultsStore();
+
+  /// Latest lock frame, and the station's own health record. Null until the
+  /// gateway sends one — which the connect snapshot does within ~360 ms.
+  PodLockSet? locks;
+  StationHealth? health;
+
+  /// Set once the gateway is seen to expose the newer characteristics, so the
+  /// UI can say "needs newer firmware" instead of showing a blank panel.
+  bool locksSupported = false;
+  bool healthSupported = false;
 
   /// True once the gateway has been seen to expose the Diagnostics service.
   /// Older firmware has no e1ec0004, and the UI says so rather than showing an
@@ -673,6 +689,7 @@ class BleService extends ChangeNotifier {
 
   final List<LogEntry> logs = [];
   StreamSubscription<List<int>>? _summarySub, _responseSub, _faultsSub;
+  StreamSubscription<List<int>>? _locksSub, _healthSub;
   StreamSubscription<BluetoothConnectionState>? _connSub;
 
   // ── Auto-reconnect (BLE_App_Integration.md §1) ──
@@ -817,6 +834,7 @@ class BleService extends ChangeNotifier {
             if (c.uuid == BleUuids.charSummary) charSummary = c;
             else if (c.uuid == BleUuids.charSelect) charSelect = c;
             else if (c.uuid == BleUuids.charDetail) charDetail = c;
+            else if (c.uuid == BleUuids.charLocks) charLocks = c;
           }
         } else if (s.uuid == BleUuids.svcControl) {
           for (final c in s.characteristics) {
@@ -826,6 +844,7 @@ class BleService extends ChangeNotifier {
         } else if (s.uuid == BleUuids.svcDiag) {
           for (final c in s.characteristics) {
             if (c.uuid == BleUuids.charFaults) charFaults = c;
+            else if (c.uuid == BleUuids.charHealth) charHealth = c;
           }
         }
       }
@@ -942,6 +961,78 @@ class BleService extends ChangeNotifier {
         log(LogType.info, 'No Diagnostics service — gateway firmware predates it');
       }
 
+      // ── Pod Locks (e1ec0204) ──
+      // Every pod's door in one payload, pushed in the connect snapshot and
+      // then at 1 Hz. Subscribed here rather than polled: a door changes state
+      // in the middle of a swap, not on our schedule.
+      if (charLocks != null) {
+        locksSupported = true;
+        try {
+          await charLocks!.setNotifyValue(true);
+          _locksSub = charLocks!.onValueReceived.listen((val) {
+            if (val.isEmpty) return;
+            try {
+              final txt = utf8.decode(val);
+              final decoded = json.decode(txt);
+              if (decoded is! Map) return;
+              final ls = PodLockSet.fromJson(
+                  decoded.cast<String, dynamic>(), DateTime.now());
+              if (ls == null) {
+                log(LogType.err, 'LOCKS frame missing station_id (${txt.length}B)');
+                return;
+              }
+              locks = ls;
+              readCount++;
+              log(LogType.rx, 'LOCKS open=${ls.openPods} (${txt.length}B)');
+              notifyListeners();
+            } catch (e) { log(LogType.err, 'Locks parse: $e'); }
+          });
+          log(LogType.info, 'Pod Locks streaming');
+        } catch (e) {
+          log(LogType.err, 'Locks subscribe: $e');
+        }
+      } else {
+        locksSupported = false;
+        log(LogType.info, 'No Pod Locks characteristic — gateway firmware predates it');
+      }
+
+      // ── Health (e1ec0402) ──
+      // The same JSON the gateway publishes to the MQTT .../health topic, from
+      // one builder in the firmware. Pushed on the fault-bitmap EDGE as well as
+      // every 10 s, so a fault reaches the phone the moment it is raised rather
+      // than at the end of the interval.
+      if (charHealth != null) {
+        healthSupported = true;
+        try {
+          await charHealth!.setNotifyValue(true);
+          _healthSub = charHealth!.onValueReceived.listen((val) {
+            if (val.isEmpty) return;
+            try {
+              final txt = utf8.decode(val);
+              final decoded = json.decode(txt);
+              if (decoded is! Map) return;
+              final h = StationHealth.fromJson(
+                  decoded.cast<String, dynamic>(), DateTime.now());
+              if (h == null) {
+                log(LogType.err, 'HEALTH frame missing station_id (${txt.length}B)');
+                return;
+              }
+              health = h;
+              readCount++;
+              log(LogType.rx,
+                  'HEALTH ${h.stationId} ${h.bitmapHex} (${txt.length}B)');
+              notifyListeners();
+            } catch (e) { log(LogType.err, 'Health parse: $e'); }
+          });
+          log(LogType.info, 'Health streaming');
+        } catch (e) {
+          log(LogType.err, 'Health subscribe: $e');
+        }
+      } else {
+        healthSupported = false;
+        log(LogType.info, 'No Health characteristic — gateway firmware predates it');
+      }
+
       _setState(ConnectionState.connected);
       log(LogType.info, 'Connected successfully!');
       // A good link ends the retry cycle, so the next drop gets a full budget
@@ -1018,10 +1109,14 @@ class BleService extends ChangeNotifier {
     _summarySub?.cancel();
     _responseSub?.cancel();
     _faultsSub?.cancel();
+    _locksSub?.cancel();
+    _healthSub?.cancel();
     _connSub?.cancel();
     device = null;
     charStation = charSummary = charSelect = charDetail = charCommand = charResponse = null;
-    charFaults = null;
+    charFaults = charLocks = charHealth = null;
+    locks = null;
+    health = null;
     deviceName = null;
     // Fault entries are cleared on disconnect rather than left on screen —
     // stale fault data shown as current is worse than showing nothing. (The
@@ -1064,7 +1159,7 @@ class BleService extends ChangeNotifier {
     return list is List ? list.length : 0;
   }
 
-  /// Slots the pod pager should offer.
+  /// Pods the pod pager should offer.
   ///
   /// Driven by what the gateway reports, per spec §7 ("render whatever
   /// total_pods you receive, don't hard-code 5"). Falls back to the firmware
@@ -1602,7 +1697,7 @@ class _DataItem extends StatelessWidget {
           Text(label.toUpperCase(),
             style: TextStyle(fontSize: 10, color: Palette.textDim, letterSpacing: 0.5, fontWeight: FontWeight.w600)),
           const SizedBox(height: 4),
-          Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: color ?? Palette.text, fontFamily: 'monospace')),
+          Text(value, style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: color ?? Palette.text, fontFamily: AppFonts.mono)),
           if (unit.isNotEmpty) Text(unit, style: TextStyle(fontSize: 10, color: Palette.textDim)),
         ],
       ),
@@ -1638,7 +1733,7 @@ Widget _faultChip(FaultCode f) {
       Icon(_sevIcon(f.sev), size: 12, color: c),
       const SizedBox(width: 5),
       Text(f.code,
-        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: c, fontFamily: 'monospace')),
+        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: c, fontFamily: AppFonts.mono)),
       const SizedBox(width: 5),
       // Flexible so a long label at a large system text scale ellipsises
       // instead of overflowing the chip — Wrap gives the Row unbounded width,
@@ -1667,13 +1762,13 @@ Widget _unlockCard(BuildContext context, BleService ble, int podNum) {
   final action = unlockActionFor(podNum, totalPods: ble.totalPods);
 
   if (action == null) {
-    // Slot beyond what the station reports, or no summary yet. Say which,
+    // Pod beyond what the station reports, or no summary yet. Say which,
     // rather than showing a button the gateway would reject.
     return _Card(
       title: const Text('LOCK'),
       child: Text(
         ble.totalPods > 0
-            ? 'Slot $podNum is not one of this station\'s ${ble.totalPods} pods.'
+            ? 'Pod $podNum is not one of this station\'s ${ble.totalPods} pods.'
             : 'Waiting for the pod summary before offering an unlock.',
         style: TextStyle(fontSize: 11, color: Palette.textDim, height: 1.5),
       ),
@@ -1688,7 +1783,7 @@ Widget _unlockCard(BuildContext context, BleService ble, int podNum) {
     title: const Text('LOCK'),
     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Text(
-        'Pulses the lock GPIO for slot $podNum. Works whether or not the slot '
+        'Pulses the lock GPIO for pod $podNum. Works whether or not the pod '
         'reports a fault.',
         style: TextStyle(fontSize: 11, color: Palette.textDim, height: 1.5),
       ),
@@ -1783,7 +1878,7 @@ Widget _healthChips(Map<String, dynamic> s) {
                 fontSize: 10,
                 fontWeight: FontWeight.w800,
                 color: rssiColor,
-                fontFamily: 'monospace')),
+                fontFamily: AppFonts.mono)),
           ]),
         ),
     ]),
@@ -1810,14 +1905,14 @@ Widget _mainErrorBanner(MainFault m, {VoidCallback? onTap}) {
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
               Text(m.code,
-                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: c, fontFamily: 'monospace')),
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: c, fontFamily: AppFonts.mono)),
               const SizedBox(width: 6),
               Text(_sevLabel(m.sev),
                 style: TextStyle(fontSize: 9, fontWeight: FontWeight.w900, color: c, letterSpacing: 1)),
             ]),
             const SizedBox(height: 2),
             // msg is rendered verbatim — firmware already prefixes pod faults
-            // with "Slot N ", so composing our own prefix would double it.
+            // with "Pod N ", so composing our own prefix would double it.
             Text(m.msg.isEmpty ? 'Fault reported' : m.msg,
               style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Palette.text)),
           ]),
@@ -1913,7 +2008,7 @@ class DashboardTab extends StatelessWidget {
                   Text('MAC', style: TextStyle(fontSize: 10, color: Palette.textDim, fontWeight: FontWeight.w700, letterSpacing: 1)),
                   const SizedBox(height: 4),
                   Text('${s['mac'] ?? '--'}',
-                    style: TextStyle(fontSize: 14, color: Palette.volt, fontWeight: FontWeight.w700, fontFamily: 'monospace')),
+                    style: TextStyle(fontSize: 14, color: Palette.volt, fontWeight: FontWeight.w700, fontFamily: AppFonts.mono)),
                 ]),
               ),
             ]),
@@ -1937,7 +2032,7 @@ class DashboardTab extends StatelessWidget {
               children: [
                 Padding(
                   padding: const EdgeInsets.only(bottom: 8),
-                  child: Text('Total Pods: ${p['total_pods'] ?? 0}', style: TextStyle(fontSize: 11, color: Palette.textDim, fontFamily: 'monospace')),
+                  child: Text('Total Pods: ${p['total_pods'] ?? 0}', style: TextStyle(fontSize: 11, color: Palette.textDim, fontFamily: AppFonts.mono)),
                 ),
                 if (p['pods'] is List) ...(p['pods'] as List).map((pod) => _podSummaryCard(pod as Map<String, dynamic>, station)).toList(),
               ],
@@ -2017,7 +2112,7 @@ class DashboardTab extends StatelessWidget {
           ],
           const Spacer(),
           Text('Relay: ${pod['relay'] ?? '--'}',
-            style: TextStyle(fontSize: 10, color: Palette.textDim, fontFamily: 'monospace')),
+            style: TextStyle(fontSize: 10, color: Palette.textDim, fontFamily: AppFonts.mono)),
         ]),
         if (pf != null && pf.hasFault) ...[
           const SizedBox(height: 7),
@@ -2047,7 +2142,7 @@ class DashboardTab extends StatelessWidget {
   Widget _statCol(String label, String val, Color color) => Expanded(child: Column(children: [
     Text(label.toUpperCase(), style: TextStyle(fontSize: 9, color: Palette.textDim, fontWeight: FontWeight.w700)),
     const SizedBox(height: 2),
-    Text(val, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: color, fontFamily: 'monospace')),
+    Text(val, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: color, fontFamily: AppFonts.mono)),
   ]));
 
   Widget _refreshBtn(VoidCallback onTap, {String label = 'READ'}) => GestureDetector(
@@ -2084,6 +2179,13 @@ class DiagnosticsTab extends StatelessWidget {
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(12),
         child: Column(children: [
+          // Health and Pod Locks come first: they are the whole-station view.
+          // The per-station fault cards below drill into one station at a time,
+          // which on a single-gateway link is the same station twice.
+          if (ble.state == ConnectionState.connected) ...[
+            _healthCard(context),
+            _locksCard(context),
+          ],
           if (ble.state != ConnectionState.connected)
             _Card(
               title: const Text('DIAGNOSTICS'),
@@ -2107,6 +2209,216 @@ class DiagnosticsTab extends StatelessWidget {
       ),
     );
   }
+
+  // ══ Health ═══════════════════════════════════════════════════════════
+  // Renders the same JSON the gateway publishes to the MQTT .../health topic,
+  // so this screen and the server dashboard cannot disagree about a fault.
+  Widget _healthCard(BuildContext context) {
+    if (!ble.healthSupported) {
+      return _Card(
+        title: const Text('STATION HEALTH'),
+        child: _noDataBox('This gateway has no Health characteristic.\n'
+            'Needs firmware with e1ec0402.'),
+      );
+    }
+    final h = ble.health;
+    if (h == null) {
+      return _Card(
+        title: const Text('STATION HEALTH'),
+        child: _noDataBox('Waiting for the first health frame...'),
+      );
+    }
+
+    final rows = <Widget>[];
+
+    // Gateway faults as chips. "No faults" is stated, not left as blank space.
+    rows.add(Wrap(spacing: 6, runSpacing: 6, children: [
+      if (h.healthy)
+        _chip('no gateway faults', Palette.success)
+      else
+        ...h.activeFaults.map((f) => _chip(f, Palette.danger)),
+    ]));
+    rows.add(const SizedBox(height: 12));
+
+    rows.add(_kv('Fault word', h.bitmapHex,
+        colour: h.healthy ? Palette.success : Palette.danger));
+    rows.add(_kv('Last reset', h.resetReason));
+    if (h.freeHeap != null) {
+      rows.add(_kv('Free heap', '${h.freeHeap} / ${h.totalHeap}'));
+    }
+    if (h.rssi != null) rows.add(_kv('WiFi RSSI', '${h.rssi} dBm'));
+    rows.add(_kv('SD card', h.sdMounted,
+        colour: h.sdMounted == 'yes' ? Palette.success : Palette.danger));
+    rows.add(_kv('Firmware', h.version));
+
+    // ── Master (STM32) ──
+    // Absent until the gateway has read the master status registers AND they
+    // passed the sanity check. "Not read yet" is the honest label - showing
+    // zeros here would look like a master reporting six dead pods.
+    rows.add(const SizedBox(height: 14));
+    rows.add(_subTitle('MASTER (STM32)'));
+    if (!h.hasMaster) {
+      rows.add(_kv('Status block', 'not read yet', colour: Palette.textDim));
+    } else {
+      rows.add(_kv('Master firmware', h.masterVersion));
+      rows.add(_kv('Pods online',
+          h.onlinePods.isEmpty ? 'none' : h.onlinePods.join(', '),
+          colour: h.onlinePods.isEmpty ? Palette.danger : Palette.success));
+      if (h.offlinePods.isNotEmpty) {
+        rows.add(_kv('Pods offline', h.offlinePods.join(', '),
+            colour: Palette.danger));
+      }
+      if (h.masterCrashed) {
+        rows.add(_kv('Watchdog reset', 'YES - the master hung',
+            colour: Palette.danger));
+      }
+      if (h.masterBrownout) {
+        rows.add(_kv('Brownout', 'yes', colour: Palette.warn));
+      }
+    }
+
+    // ── Cabinet sensors ──
+    // Each probe appears only when fitted. An absent field means "no sensor",
+    // never zero, so an unfitted probe says so in words instead of showing 0.
+    if (h.sensorFlags != null) {
+      rows.add(const SizedBox(height: 14));
+      rows.add(_subTitle('CABINET'));
+      if (!h.hasAnySensor) {
+        rows.add(_kv('Probes', 'none fitted', colour: Palette.textDim));
+      }
+      if (h.hasClimate) {
+        rows.add(_kv('Temperature', '${h.cabTempC} C'));
+        rows.add(_kv('Humidity', '${h.cabHumidity} %'));
+      }
+      if (h.hasWaterProbe) {
+        rows.add(_kv(
+            'Water',
+            h.waterAlarm
+                ? 'ALARM (${h.waterRaw} raw)'
+                : 'ok (${h.waterRaw} raw)',
+            colour: h.waterAlarm ? Palette.danger : Palette.success));
+      }
+      if (h.hasSmokeProbe) {
+        rows.add(_kv(
+            'Smoke',
+            h.smokeAlarm
+                ? 'ALARM (${h.smokeRaw} raw)'
+                : 'ok (${h.smokeRaw} raw)',
+            colour: h.smokeAlarm ? Palette.danger : Palette.success));
+      }
+    }
+
+    return _Card(
+      title: Row(children: [
+        const Text('STATION HEALTH'),
+        const SizedBox(width: 8),
+        if (h.hasUrgentAlarm)
+          _chip('ACTION NEEDED', Palette.danger)
+        else if (!h.healthy)
+          _chip('FAULTS', Palette.warn),
+      ]),
+      child:
+          Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: rows),
+    );
+  }
+
+  // ══ Pod locks ════════════════════════════════════════════════════════
+  Widget _locksCard(BuildContext context) {
+    if (!ble.locksSupported) {
+      return _Card(
+        title: const Text('POD LOCKS'),
+        child: _noDataBox('This gateway has no Pod Locks characteristic.\n'
+            'Needs firmware with e1ec0204.'),
+      );
+    }
+    final ls = ble.locks;
+    if (ls == null) {
+      return _Card(
+        title: const Text('POD LOCKS'),
+        child: _noDataBox('Waiting for the first lock frame...'),
+      );
+    }
+
+    final unexplained = ls.unexplainedOpenPods;
+
+    return _Card(
+      title: Row(children: [
+        const Text('POD LOCKS'),
+        const SizedBox(width: 8),
+        if (unexplained.isNotEmpty)
+          _chip('POD ${unexplained.join(", ")} OPEN', Palette.danger),
+      ]),
+      child: Column(children: [
+        for (final pod in (ls.byPod.keys.toList()..sort()))
+          _lockRow(ls.byPod[pod]!),
+      ]),
+    );
+  }
+
+  Widget _lockRow(PodLock l) {
+    // Open WITH a swap behind it is routine. Open with no swap is the case
+    // worth flagging: nobody asked for that door to be open.
+    final Color c = !l.isOpen
+        ? Palette.success
+        : (l.swapping ? Palette.warn : Palette.danger);
+    final String label = !l.isOpen
+        ? 'CLOSED'
+        : (l.swapping ? 'OPEN - swap ${l.swapTimeout}s' : 'OPEN - no swap');
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Row(children: [
+        SizedBox(
+            width: 46,
+            child: Text('Pod ${l.pod}',
+                style: TextStyle(
+                    fontWeight: FontWeight.w700, color: Palette.text))),
+        _chip(label, c),
+        const Spacer(),
+        Text(l.online ? 'online' : 'OFFLINE',
+            style: TextStyle(
+                fontSize: 11.5,
+                color: l.online ? Palette.textDim : Palette.danger)),
+      ]),
+    );
+  }
+
+  Widget _chip(String text, Color c) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          border: Border.all(color: c),
+          borderRadius: BorderRadius.circular(5),
+        ),
+        child: Text(text,
+            style:
+                TextStyle(fontSize: 11, color: c, fontWeight: FontWeight.w600)),
+      );
+
+  Widget _subTitle(String t) => Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Text(t,
+            style: TextStyle(
+                fontSize: 11,
+                letterSpacing: 1.2,
+                fontWeight: FontWeight.w700,
+                color: Palette.textDim)),
+      );
+
+  Widget _kv(String k, String v, {Color? colour}) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SizedBox(
+              width: 130,
+              child: Text(k,
+                  style: TextStyle(fontSize: 12.5, color: Palette.textDim))),
+          Expanded(
+              child: Text(v,
+                  style: TextStyle(
+                      fontSize: 12.5,
+                      fontFamily: AppFonts.mono,
+                      color: colour ?? Palette.text))),
+        ]),
+      );
 
   Widget _stationCard(BuildContext context, StationFaults s) {
     final active = s.allActive;
@@ -2158,7 +2470,7 @@ class DiagnosticsTab extends StatelessWidget {
               style: TextStyle(fontSize: 9, color: Palette.textDim, fontWeight: FontWeight.w700, letterSpacing: 1)),
             const SizedBox(width: 8),
             Text('0x${s.sta.toRadixString(16).toUpperCase().padLeft(8, '0')}',
-              style: TextStyle(fontSize: 11, color: Palette.text, fontFamily: 'monospace', fontWeight: FontWeight.w700)),
+              style: TextStyle(fontSize: 11, color: Palette.text, fontFamily: AppFonts.mono, fontWeight: FontWeight.w700)),
           ]),
         ),
       ]),
@@ -2181,10 +2493,10 @@ class DiagnosticsTab extends StatelessWidget {
           Icon(_sevIcon(f.sev), size: 15, color: c),
           const SizedBox(width: 9),
           Text(f.code,
-            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: c, fontFamily: 'monospace')),
+            style: TextStyle(fontSize: 11, fontWeight: FontWeight.w900, color: c, fontFamily: AppFonts.mono)),
           const SizedBox(width: 9),
           Expanded(
-            child: Text(f.isStation ? f.sentence : f.withSlot,
+            child: Text(f.isStation ? f.sentence : f.withPod,
               style: TextStyle(fontSize: 12, color: Palette.text, fontWeight: FontWeight.w600)),
           ),
           Text(_sevLabel(f.sev),
@@ -2215,7 +2527,7 @@ class DiagnosticsTab extends StatelessWidget {
         ),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           Text('POD ${p.p}',
-            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: c, fontFamily: 'monospace')),
+            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w900, color: c, fontFamily: AppFonts.mono)),
           const SizedBox(width: 6),
           Text(p.online ? (p.hasFault ? 'FAULT' : 'OK') : 'OFFLINE',
             style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: Palette.textDim)),
@@ -2521,7 +2833,7 @@ class _PodDetailTabState extends State<PodDetailTab> {
         Text(label, style: TextStyle(fontSize: 10, color: Palette.textDim, fontWeight: FontWeight.w700, letterSpacing: 1)),
         const Spacer(),
         Text('${last.toStringAsFixed(2)} $unit',
-          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color, fontFamily: 'monospace')),
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color, fontFamily: AppFonts.mono)),
       ]),
       const SizedBox(height: 4),
       SizedBox(
@@ -2565,7 +2877,7 @@ class _PodDetailTabState extends State<PodDetailTab> {
             style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Palette.textDim, letterSpacing: 0.5)),
           const Spacer(),
           Text('${(soc as num).toStringAsFixed(1)} %',
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: _socColor(soc), fontFamily: 'monospace')),
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: _socColor(soc), fontFamily: AppFonts.mono)),
         ]),
         const SizedBox(height: 6),
         Container(
@@ -2602,7 +2914,7 @@ class _PodDetailTabState extends State<PodDetailTab> {
             ),
             child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
               Text('C${i+1}', style: TextStyle(fontSize: 10, color: Palette.textDim, fontWeight: FontWeight.w600)),
-              Text((mv / 1000).toStringAsFixed(3), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color, fontFamily: 'monospace')),
+              Text((mv / 1000).toStringAsFixed(3), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color, fontFamily: AppFonts.mono)),
             ]),
           );
         }),
@@ -2622,7 +2934,7 @@ class _PodDetailTabState extends State<PodDetailTab> {
             decoration: BoxDecoration(color: Palette.dataBg, borderRadius: BorderRadius.circular(6)),
             child: Column(children: [
               Text('$prefix${i+1}', style: TextStyle(fontSize: 10, color: Palette.textDim, fontWeight: FontWeight.w600)),
-              Text(t.toStringAsFixed(1), style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: color, fontFamily: 'monospace')),
+              Text(t.toStringAsFixed(1), style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: color, fontFamily: AppFonts.mono)),
             ]),
           );
         }),
@@ -2678,9 +2990,9 @@ class LogTab extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 1),
       child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('[$ts] ', style: TextStyle(fontSize: 10, color: Palette.textDim, fontFamily: 'monospace')),
-        Text('[$prefix] ', style: TextStyle(fontSize: 10, color: color, fontFamily: 'monospace', fontWeight: FontWeight.w700)),
-        Expanded(child: Text(e.msg, style: TextStyle(fontSize: 10, color: color, fontFamily: 'monospace'))),
+        Text('[$ts] ', style: TextStyle(fontSize: 10, color: Palette.textDim, fontFamily: AppFonts.mono)),
+        Text('[$prefix] ', style: TextStyle(fontSize: 10, color: color, fontFamily: AppFonts.mono, fontWeight: FontWeight.w700)),
+        Expanded(child: Text(e.msg, style: TextStyle(fontSize: 10, color: color, fontFamily: AppFonts.mono))),
       ]),
     );
   }
@@ -2941,7 +3253,7 @@ class SettingsTab extends StatelessWidget {
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(color: Palette.dataBg, borderRadius: BorderRadius.circular(6)),
               child: Text(ble.lastCmdResponse,
-                style: TextStyle(fontSize: 11, color: Palette.accent, fontFamily: 'monospace')),
+                style: TextStyle(fontSize: 11, color: Palette.accent, fontFamily: AppFonts.mono)),
             ),
           ]),
         ),
@@ -2980,7 +3292,7 @@ class SettingsTab extends StatelessWidget {
     padding: const EdgeInsets.all(10),
     decoration: BoxDecoration(color: Palette.dataBg, borderRadius: BorderRadius.circular(8)),
     child: Column(children: [
-      Text(val, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Palette.accent, fontFamily: 'monospace')),
+      Text(val, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Palette.accent, fontFamily: AppFonts.mono)),
       const SizedBox(height: 2),
       Text(label.toUpperCase(), style: TextStyle(fontSize: 10, color: Palette.textDim)),
     ]),
@@ -3003,7 +3315,7 @@ class SettingsTab extends StatelessWidget {
         )),
         SizedBox(width: 70, child: Text('${value.toStringAsFixed(0)} $unit',
           textAlign: TextAlign.right,
-          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, fontFamily: 'monospace'))),
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, fontFamily: AppFonts.mono))),
       ]),
     );
   }
@@ -3087,7 +3399,7 @@ class SettingsTab extends StatelessWidget {
       const SizedBox(width: 10),
       Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700)),
-        Text(subtitle, style: TextStyle(fontSize: 11, color: Palette.textDim, fontFamily: 'monospace')),
+        Text(subtitle, style: TextStyle(fontSize: 11, color: Palette.textDim, fontFamily: AppFonts.mono)),
       ])),
     ]),
   );
@@ -3154,7 +3466,7 @@ class SettingsTab extends StatelessWidget {
             Text(label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
             const SizedBox(height: 2),
             Text(displayValue,
-              style: TextStyle(fontSize: 11, color: Palette.textDim, fontFamily: 'monospace'),
+              style: TextStyle(fontSize: 11, color: Palette.textDim, fontFamily: AppFonts.mono),
               overflow: TextOverflow.ellipsis),
           ],
         )),
@@ -3464,7 +3776,7 @@ class _DevicePickerSheetState extends State<DevicePickerSheet> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(title, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Palette.text)),
-                  Text(sub, style: TextStyle(fontSize: 10, color: Palette.textDim, fontFamily: 'monospace')),
+                  Text(sub, style: TextStyle(fontSize: 10, color: Palette.textDim, fontFamily: AppFonts.mono)),
                 ],
               )),
               if (live)
@@ -3591,13 +3903,13 @@ class _DevicePickerSheetState extends State<DevicePickerSheet> {
                     )),
                   const SizedBox(height: 2),
                   Text(r.device.remoteId.str,
-                    style: TextStyle(fontSize: 11, color: Palette.textDim, fontFamily: 'monospace')),
+                    style: TextStyle(fontSize: 11, color: Palette.textDim, fontFamily: AppFonts.mono)),
                 ],
               )),
               const SizedBox(width: 8),
               Column(children: [
                 Icon(rssiIcon, color: rssiColor, size: 16),
-                Text('$rssi', style: TextStyle(fontSize: 10, color: rssiColor, fontFamily: 'monospace')),
+                Text('$rssi', style: TextStyle(fontSize: 10, color: rssiColor, fontFamily: AppFonts.mono)),
               ]),
             ]),
           ),
@@ -3876,7 +4188,7 @@ Widget _meshSummary(MeshStore store) {
                   fontSize: 20,
                   fontWeight: FontWeight.w900,
                   color: c,
-                  fontFamily: 'monospace')),
+                  fontFamily: AppFonts.mono)),
           const SizedBox(height: 2),
           Text(label,
               textAlign: TextAlign.center,
@@ -3930,7 +4242,7 @@ Widget _meshEmptyHelp(bool scanning) => _Card(
                 style: TextStyle(
                     fontSize: 11,
                     color: Palette.accent,
-                    fontFamily: 'monospace')),
+                    fontFamily: AppFonts.mono)),
           ),
           const SizedBox(height: 8),
           Text(
@@ -4024,7 +4336,7 @@ Widget _meshNodeCard(MeshNode n, DateTime now) {
                 style: TextStyle(
                     fontSize: 11,
                     color: Palette.textDim,
-                    fontFamily: 'monospace')),
+                    fontFamily: AppFonts.mono)),
             const SizedBox(width: 12),
             Icon(Icons.schedule,
                 size: 13, color: beaconStale ? Palette.warn : Palette.textDim),
@@ -4033,7 +4345,7 @@ Widget _meshNodeCard(MeshNode n, DateTime now) {
                 style: TextStyle(
                     fontSize: 11,
                     color: beaconStale ? Palette.warn : Palette.textDim,
-                    fontFamily: 'monospace')),
+                    fontFamily: AppFonts.mono)),
           ]),
           if (n.deviceUuid != null && n.deviceUuid!.isBssStation) ...[
             const SizedBox(height: 4),
@@ -4041,7 +4353,7 @@ Widget _meshNodeCard(MeshNode n, DateTime now) {
                 style: TextStyle(
                     fontSize: 10,
                     color: Palette.textDim,
-                    fontFamily: 'monospace')),
+                    fontFamily: AppFonts.mono)),
           ],
           if (st != null) ...[
             const SizedBox(height: 10),

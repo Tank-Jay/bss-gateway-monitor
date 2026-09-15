@@ -20,7 +20,7 @@
 
 /// Per-pod fault text, bit 0..7 → POD-01..POD-08.
 /// Verbatim from Fault_PodText(). The lowercase entries are deliberate: the
-/// firmware composes `main.msg` as "Slot N <text>", so keeping the same
+/// firmware composes `main.msg` as "Pod N <text>", so keeping the same
 /// strings means a fault never appears with two different wordings on one
 /// screen. Use [FaultCode.sentence] when rendering the text standalone.
 const List<String> kPodText = [
@@ -168,11 +168,11 @@ class FaultCode {
       text.isEmpty ? text : text[0].toUpperCase() + text.substring(1);
 
   /// How this fault reads with its slot, matching the firmware's `main.msg`
-  /// composition ("Slot 2 lock failed to open").
-  String get withSlot => isStation ? text : 'Slot $slot $text';
+  /// composition ("Pod 2 lock failed to open").
+  String get withPod => isStation ? text : 'Pod $slot $text';
 
   @override
-  String toString() => '$code($sev) $withSlot';
+  String toString() => '$code($sev) $withPod';
 }
 
 /// Decode the 32-bit station fault word. Covers bits 0..31 the way the

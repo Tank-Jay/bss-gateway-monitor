@@ -180,7 +180,7 @@ void main() {
 
     test('rebuild the same wording Fault_MainError would have sent', () {
       // Pod path: snprintf(msg, "Slot %u %s", slot, Fault_PodText(b)).
-      expect(meshMainMessage('LOCK_FAIL', 2), 'Slot 2 lock failed to open');
+      expect(meshMainMessage('LOCK_FAIL', 2), 'Pod 2 lock failed to open');
       // Station path: the bare text.
       expect(meshMainMessage('RS485_DEAD', 0), 'RS485/STM32 link dead');
       expect(meshMainMessage('OK', 0), isEmpty);
@@ -234,7 +234,7 @@ void main() {
         'severity': 2,
       }, at: _t0);
       expect(s.isPodFault, isTrue);
-      expect(s.main.msg, 'Slot 3 over-temperature');
+      expect(s.main.msg, 'Pod 3 over-temperature');
       expect(s.main.slot, 3);
       expect(s.main.isOk, isFalse);
     });

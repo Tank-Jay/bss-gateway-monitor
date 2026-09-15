@@ -101,12 +101,12 @@ void main() {
       }
     });
 
-    test('withSlot matches the firmware main.msg composition', () {
-      // Firmware: snprintf(msg, "Slot %u %s", slot, Fault_PodText(b))
+    test('withPod matches the firmware main.msg composition', () {
+      // Firmware: snprintf(msg, "Pod %u %s", slot, Fault_PodText(b))
       final f = decodePod(1 << 1, 2).single;
-      expect(f.withSlot, 'Slot 2 lock failed to open');
+      expect(f.withPod, 'Pod 2 lock failed to open');
       // And a station fault carries no prefix.
-      expect(decodeStation(1 << 4).single.withSlot, 'RS485/STM32 link dead');
+      expect(decodeStation(1 << 4).single.withPod, 'RS485/STM32 link dead');
     });
 
     test('sentence capitalises without mutating the wire text', () {

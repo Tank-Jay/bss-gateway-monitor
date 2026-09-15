@@ -151,8 +151,8 @@ const Set<String> kUnlockableCodes = {
 FixAction? unlockActionFor(int slot, {required int totalPods}) {
   if (slot < 1 || slot > totalPods) return null;
   return FixAction(
-    label: 'UNLOCK SLOT $slot',
-    description: 'Re-pulse the lock on slot $slot. '
+    label: 'UNLOCK POD $slot',
+    description: 'Re-pulse the lock on pod $slot. '
         'This physically releases the battery in that bay.',
     kind: FixKind.podUnlock,
     payload: buildCommand('pod_action', {'slot': slot, 'action': 'unlock'}),
@@ -293,7 +293,7 @@ class FixResult {
 
   String get message {
     if (ok) return 'Accepted';
-    if (op == 'pod_action') return 'Rejected — slot $slot out of range';
+    if (op == 'pod_action') return 'Rejected — pod $slot out of range';
     return 'Rejected by gateway';
   }
 
