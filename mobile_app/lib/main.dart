@@ -19,6 +19,7 @@ import 'fixes.dart';
 import 'mesh.dart';
 import 'health.dart';
 import 'theme.dart';
+import 'sections.dart';
 
 // ══════════════════════════════════════════════════════════════
 //  BLE UUIDs — must match BLE_handler.h
@@ -445,7 +446,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   void _goHome() {
     Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const HomeScreen()),
+      MaterialPageRoute(builder: (_) => const SectionScreen()),
     );
   }
 
@@ -3199,47 +3200,6 @@ class SettingsTab extends StatelessWidget {
           ),
         ),
 
-        // BLE Mesh — Method 2 (doc/BLE_App_Integration.md §0, §8).
-        // Lives here rather than in the tab bar on purpose: the two BLE
-        // methods are mutually exclusive per firmware build, so a station is
-        // never reachable both ways at once and a permanent tab would be dead
-        // weight on every Method-1 deployment.
-        _Card(
-          title: const Text('BLE MESH (METHOD 2)'),
-          child: Column(children: [
-            Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Text(
-                'For gateways flashed with CURRENT_BLE_METHOD = BLE_METHOD_MESH. '
-                'Scans for stations running as mesh nodes and shows which are '
-                'provisioned.',
-                style: TextStyle(fontSize: 11, color: Palette.textDim, height: 1.4),
-              ),
-            ),
-            SizedBox(
-              width: double.infinity,
-              height: 44,
-              child: OutlinedButton.icon(
-                onPressed: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const MeshScreen()),
-                ),
-                icon: Icon(Icons.hub_outlined, size: 18, color: Palette.accent),
-                label: Text('OPEN MESH MONITOR',
-                  style: TextStyle(
-                    color: Palette.accent,
-                    fontWeight: FontWeight.w800,
-                    fontSize: 12,
-                    letterSpacing: 0.8)),
-                style: OutlinedButton.styleFrom(
-                  side: BorderSide(color: Palette.accent),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8)),
-                ),
-              ),
-            ),
-          ]),
-        ),
-
         // Control commands
         _Card(
           title: const Text('REMOTE CONTROL'),
@@ -3440,7 +3400,8 @@ class SettingsTab extends StatelessWidget {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove('bss_auth');
       if (context.mounted) {
-        Navigator.pushReplacement(context, MaterialPageRoute(builder: (_) => const LoginScreen()));
+        Navigator.pushAndRemoveUntil(context,
+            MaterialPageRoute(builder: (_) => const LoginScreen()), (r) => false);
       }
     }
   }
