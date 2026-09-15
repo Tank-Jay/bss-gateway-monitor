@@ -1924,12 +1924,6 @@ Widget _mainErrorBanner(MainFault m, {VoidCallback? onTap}) {
   );
 }
 
-Widget _statusBadge(String? v) {
-  if (v == 'yes') return Text('YES', style: TextStyle(color: Palette.success, fontWeight: FontWeight.w700, fontSize: 18));
-  if (v == 'no') return Text('NO', style: TextStyle(color: Palette.danger, fontWeight: FontWeight.w700, fontSize: 18));
-  return Text('--', style: TextStyle(color: Palette.text, fontWeight: FontWeight.w700, fontSize: 18));
-}
-
 // ══════════════════════════════════════════════════════════════
 //  Dashboard Tab
 // ══════════════════════════════════════════════════════════════
@@ -2877,7 +2871,7 @@ class _PodDetailTabState extends State<PodDetailTab> {
           Text('POD ${d['pod']} - SOC',
             style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Palette.textDim, letterSpacing: 0.5)),
           const Spacer(),
-          Text('${(soc as num).toStringAsFixed(1)} %',
+          Text('${soc.toStringAsFixed(1)} %',
             style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, color: _socColor(soc), fontFamily: AppFonts.mono)),
         ]),
         const SizedBox(height: 6),
