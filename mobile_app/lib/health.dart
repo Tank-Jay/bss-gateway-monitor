@@ -25,21 +25,29 @@ class SensorFlags {
 class HealthFlag {
   final String key;    // JSON key, e.g. "rs485_fault"
   final String label;  // human text, e.g. "RS485 link"
-  const HealthFlag(this.key, this.label);
+  final int bit;       // position in `bitmap`, FaultIdTypeDef in Task_handler.h
+  const HealthFlag(this.key, this.label, this.bit);
 }
 
-/// The gateway's own fault booleans, in the order the firmware sets them
-/// (FaultIdTypeDef in Task_handler.h). `bitmap` carries the same word in hex.
+/// The gateway's own faults. Current firmware publishes only `bitmap` and
+/// leaves the named booleans out, so these are decoded from the word; older
+/// firmware sends both and the explicit key wins.
+///
+/// The bit numbers are NOT the list positions. FaultIdTypeDef reserves bit 7
+/// for FAULT_AUDIO, which has never been published under a name of its own,
+/// so counting along this list would report `queue_full` and `low_heap` one
+/// bit early. Each entry carries its real bit.
 const List<HealthFlag> kHealthFlags = [
-  HealthFlag('sd_fault',     'SD card'),
-  HealthFlag('ntp_fault',    'Time sync'),
-  HealthFlag('mqtt_fault',   'Cloud (MQTT)'),
-  HealthFlag('wifi_fault',   'WiFi'),
-  HealthFlag('rs485_fault',  'RS485 link'),
-  HealthFlag('reboot_fault', 'Abnormal reboot'),
-  HealthFlag('brownout',     'Brownout'),
-  HealthFlag('queue_full',   'Offline queue full'),
-  HealthFlag('low_heap',     'Low memory'),
+  HealthFlag('sd_fault',     'SD card',            0),
+  HealthFlag('ntp_fault',    'Time sync',          1),
+  HealthFlag('mqtt_fault',   'Cloud (MQTT)',       2),
+  HealthFlag('wifi_fault',   'WiFi',               3),
+  HealthFlag('rs485_fault',  'RS485 link',         4),
+  HealthFlag('reboot_fault', 'Abnormal reboot',    5),
+  HealthFlag('brownout',     'Brownout',           6),
+  // bit 7 = FAULT_AUDIO, never given a JSON key
+  HealthFlag('queue_full',   'Offline queue full', 8),
+  HealthFlag('low_heap',     'Low memory',         9),
 ];
 
 /// A parsed health record. Every block below the gateway's own fields is
@@ -98,26 +106,86 @@ class StationHealth {
     required this.smokeAlarm,
   });
 
+  /// Collapses the payload to one flat key/value map, accepting every shape
+  /// the gateway has published:
+  ///
+  ///   nested   {"fault":{"bitmap":"0x0","sd_fault":0}, "system":{...}}
+  ///   arrays   {"Fault":[{"bitmap":"0x0"},{"sd_fault":0}], ...}
+  ///   flat     {"bitmap":"0x0", "sd_fault":0, ...}
+  ///
+  /// Nested is what current firmware sends. Flat is what every station still
+  /// in the field sends until it is reflashed, and one phone build meets both
+  /// on the same day, so reading only the new shape would blank every screen.
+  /// The array form was a short-lived middle step; accepting it costs one
+  /// branch and saves a support call if any station ever shipped with it.
+  ///
+  /// Key names are unique across the five groups, so flattening them into one
+  /// map cannot collide.
+  static Map<String, dynamic> _flatten(Map<String, dynamic> j) {
+    final out = <String, dynamic>{};
+    j.forEach((k, v) {
+      if (v is Map) {
+        v.forEach((k2, v2) => out['$k2'] = v2);
+      } else if (v is List) {
+        for (final e in v) {
+          if (e is Map) {
+            e.forEach((k2, v2) => out['$k2'] = v2);
+          }
+        }
+      } else {
+        out[k] = v;
+      }
+    });
+    return out;
+  }
+
   /// Returns null when the frame carries no station_id — a truncated payload
   /// must never overwrite a good record.
-  static StationHealth? fromJson(Map<String, dynamic> j, DateTime at) {
+  static StationHealth? fromJson(Map<String, dynamic> raw, DateTime at) {
+    final j = _flatten(raw);
+
     final sid = (j['station_id'] as String?)?.trim();
     if (sid == null || sid.isEmpty) return null;
 
     int? asInt(String k) => (j[k] as num?)?.toInt();
+
+    /// A field the gateway sends as hex TEXT ("0x0107"), but that older
+    /// firmware sent as a plain number (263). Both are accepted: a gateway in
+    /// the field is not reflashed the same day the app updates, and reading
+    /// one form only turns the whole master block into "not reported".
+    int? asHexOrInt(String k) {
+      final v = j[k];
+      if (v is num) return v.toInt();
+      if (v is! String) return null;
+      final t = v.trim();
+      if (t.isEmpty) return null;
+      if (t.startsWith('0x') || t.startsWith('0X')) {
+        return int.tryParse(t.substring(2), radix: 16);
+      }
+      return int.tryParse(t);
+    }
     double? asDouble(String k) => (j[k] as num?)?.toDouble();
     bool asBool(String k) => ((j[k] as num?)?.toInt() ?? 0) != 0;
 
+    // Current firmware publishes `bitmap` alone and drops the nine named
+    // booleans, so they are decoded from the word. Where a station still
+    // sends an explicit key, that key wins: it is what the gateway itself
+    // concluded, and a disagreement should show the gateway's answer.
+    final bmHex = (j['bitmap'] as String?) ?? '0x00000000';
+    final bm = asHexOrInt('bitmap') ?? 0;
+
     final f = <String, bool>{};
     for (final hf in kHealthFlags) {
-      f[hf.key] = asBool(hf.key);
+      f[hf.key] = j.containsKey(hf.key)
+          ? asBool(hf.key)
+          : (bm >> hf.bit) & 1 == 1;
     }
 
     return StationHealth(
       at: at,
       stationId: sid,
       ts: (j['TS'] as String?) ?? '',
-      bitmapHex: (j['bitmap'] as String?) ?? '0x00000000',
+      bitmapHex: bmHex,
       flags: f,
       resetReason: (j['reset_reason'] as String?) ?? '',
       totalHeap: asInt('total_heap'),
@@ -128,11 +196,11 @@ class StationHealth {
       version: (j['version'] as String?) ?? '',
       podsOnline: asInt('pods_online'),
       podsOffline: asInt('pods_offline'),
-      masterFw: asInt('master_fw'),
+      masterFw: asHexOrInt('master_fw'),
       masterReset: asInt('master_reset'),
       masterCrashed: asBool('master_crashed'),
       masterBrownout: asBool('master_brownout'),
-      sensorFlags: asInt('sensor_flags'),
+      sensorFlags: asHexOrInt('sensor_flags'),
       cabTempC: asDouble('cab_temp_c'),
       cabHumidity: asDouble('cab_humidity'),
       waterRaw: asInt('water_raw'),

@@ -2242,8 +2242,18 @@ class DiagnosticsTab extends StatelessWidget {
       rows.add(_kv('Free heap', '${h.freeHeap} / ${h.totalHeap}'));
     }
     if (h.rssi != null) rows.add(_kv('WiFi RSSI', '${h.rssi} dBm'));
-    rows.add(_kv('SD card', h.sdMounted,
-        colour: h.sdMounted == 'yes' ? Palette.success : Palette.danger));
+    // Current firmware dropped sd_mounted from the payload, but bit 0 of the
+    // fault word still says the same thing. Without this the row rendered an
+    // empty value in red, which reads as "SD card failed" when the truth is
+    // only that the station stopped reporting the string.
+    if (h.sdMounted.isNotEmpty) {
+      rows.add(_kv('SD card', h.sdMounted,
+          colour: h.sdMounted == 'yes' ? Palette.success : Palette.danger));
+    } else {
+      final sdBad = h.flags['sd_fault'] == true;
+      rows.add(_kv('SD card', sdBad ? 'fault' : 'mounted',
+          colour: sdBad ? Palette.danger : Palette.success));
+    }
     rows.add(_kv('Firmware', h.version));
 
     // ── Master (STM32) ──
