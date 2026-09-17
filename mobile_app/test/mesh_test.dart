@@ -6,7 +6,7 @@ import 'package:bss_gateway_monitor/mesh.dart';
 
 /// The §8.3 example payload, verbatim from doc/BLE_App_Integration.md.
 const String kDocExample =
-    '{ "station": "Other", "faultBits": 16, "mainFault": "RS485_DEAD", '
+    '{ "station": "BLR001", "faultBits": 16, "mainFault": "RS485_DEAD", '
     '"faultSlot": 0, "severity": 2 }';
 
 List<int> _access(String jsonBody) =>
@@ -193,7 +193,7 @@ void main() {
   group('MeshStatus', () {
     test("decodes the doc's own §8.3 example", () {
       final s = MeshStatus.fromAccessPayload(_access(kDocExample), at: _t0)!;
-      expect(s.station, 'Other');
+      expect(s.station, 'BLR001');
       expect(s.faultBits, 16);
       expect(s.mainFault, 'RS485_DEAD');
       expect(s.faultSlot, 0);
@@ -318,8 +318,9 @@ void main() {
       expect(node().label, 'AA:BB:CC:DD:EE:FF');
     });
 
-    test('an empty station name does not win over the MAC', () {
-      // MESH_STATION_NAME is a build constant and can be left blank.
+    test('an empty station id does not win over the MAC', () {
+      // A station whose id has not been set yet publishes an empty string.
+      // Labelling that node '' would make it unidentifiable in the list.
       final n = node(
         uuid: uuid,
         status: MeshStatus.fromJson({'station': '', 'mainFault': 'OK'}, at: _t0),

@@ -297,16 +297,18 @@ String meshMainMessage(String code, int slot) {
 
 /// One node's published fault report.
 ///
-///     {"station":"Other","faultBits":16,"mainFault":"RS485_DEAD",
+///     {"station":"BLR001","faultBits":16,"mainFault":"RS485_DEAD",
 ///      "faultSlot":0,"severity":2}
 ///
 /// Built by Mesh_ContinousCheck() from the same fault engine as the GATT path
 /// (Fault_GetBitmap / Fault_ComputePodBytes / Fault_MainError), which is why
 /// [stationFaults] can reuse faults.dart's decoder unchanged.
 class MeshStatus {
-  /// `MESH_STATION_NAME` from Feature_Config.h. Note this is a build-time
-  /// constant, so every station flashed from one image reports the same name —
-  /// [MeshNode.label] prefers the MAC when it has one.
+  /// The station id, `UdfMqtt.stationId` — the same value the GATT payloads
+  /// send as `station_id` (`"BLR001"` by default). It is set at runtime, so it
+  /// is unique per station rather than per firmware image, and [MeshNode.label]
+  /// can trust it as a name. An empty string still falls back to the MAC: a
+  /// station that has not had its id set yet must not be labelled `""`.
   final String station;
 
   /// uint32 station fault bitmap. Decode with the STA table (§4.1).
@@ -446,8 +448,8 @@ class MeshNode {
   /// mesh hardware. Only knowable while unprovisioned — see [deviceUuid].
   bool get isBssStation => deviceUuid?.isBssStation ?? false;
 
-  /// Best available name: the published station name, else the MAC tail from
-  /// the device UUID, else the raw scan id.
+  /// Best available name: the published station id, else the MAC tail from the
+  /// device UUID, else the raw scan id.
   String get label {
     final s = status?.station;
     if (s != null && s.isNotEmpty) return s;
