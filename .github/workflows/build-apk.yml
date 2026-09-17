@@ -216,7 +216,15 @@ jobs:
 
       - name: Build release APK
         working-directory: ./mobile_app
-        run: flutter build apk --release
+        # ARM only. A default build ships native libs for three ABIs and every
+        # phone downloads all three to use one: x86_64 alone was 19 MB of a
+        # 56 MB APK, and nothing but an emulator can run it. Dropping it is
+        # ~35% off the download with no device lost, and it stays ONE file, so
+        # nobody has to be told which APK to take.
+        #
+        # Keep armeabi-v7a: 32-bit handsets are still in the field. If those
+        # are ever retired, --target-platform android-arm64 halves it again.
+        run: flutter build apk --release --target-platform android-arm,android-arm64
 
       - name: Rename APK with build info
         working-directory: ./mobile_app
